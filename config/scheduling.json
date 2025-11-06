@@ -1,0 +1,4 @@
+{
+    "rr_timeslice": 10,
+    "wfq_weights": [1, 1, 2]
+}

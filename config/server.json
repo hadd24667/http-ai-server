@@ -1,0 +1,5 @@
+{
+    "port": 8080,
+    "threads": 8,
+    "ai_url": "http://127.0.0.1:5000/predict"
+}

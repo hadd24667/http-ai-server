@@ -1,0 +1,10 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Build C++ Server",
+            "type": "shell",
+            "command": "cmake -S server -B build && cmake --build build"
+        }
+    ]
+}
