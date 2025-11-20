@@ -1,38 +1,38 @@
 #pragma once
-#include <iostream>
-#include <string>
-#include <atomic>
-#include <memory>
-#include "utils/Config.hpp"
 
-class ThreadPool;
-class Scheduler;
-class Socket;
+#include <memory>
+#include <string>
+
+#include "core/Request.hpp"
+#include "core/Socket.hpp"
+#include "scheduler/Scheduler.hpp"
+#include "threadpool/ThreadPool.hpp"
 
 class HttpServer {
-    public:
-        HttpServer(int port, int threadCount);
-        ~HttpServer();
+public:
+    HttpServer(int port, int threadCount);
+    ~HttpServer();
 
-        // Start server
-        void start();
+    void start();
+    void stop();
 
-        // stop server
-        void stop();
-    
-    private:
-        int port;
-        int threadCount;
+private:
+    int port;
+    int threadCount;
+    bool isRunning;
+    int nextTaskId;
 
-        std::unique_ptr<ThreadPool> threadPool;
-        std::unique_ptr<Scheduler> scheduler;
-        std::unique_ptr<Socket> serverSocket;
-        
-        std::atomic<bool> isRunning;
+    std::unique_ptr<Socket> serverSocket;
+    std::unique_ptr<ThreadPool> threadPool;
+    std::unique_ptr<Scheduler> scheduler;
 
-        // accept new connections from clients
-        void acceptLoop();
+    // ===== Helper functions =====
+    std::string readRequestBlocking(int clientFd);
+    int estimateTaskWorkload(const Request& req);
+    int getWeightFromConfig();
 
-        // handle 1 rewuest from client (worker thread)
-        void handleClient(int clientSocket);
+    void handleClient(int clientSocketFd, const Request& req);
+
+    // Not used anymore, but keep to avoid linker errors
+    void acceptLoop();
 };
