@@ -3,6 +3,8 @@
 #include "scheduler/SJFScheduler.hpp"
 #include "scheduler/RRScheduler.hpp"
 #include "scheduler/WFQScheduler.hpp"
+#include "scheduler/AdaptiveScheduler.hpp"
+
 
 std::unique_ptr<Scheduler> SchedulerFactory::create(const std::string& type, int timeSlice) {
     if (type == "FIFO") {
@@ -17,7 +19,9 @@ std::unique_ptr<Scheduler> SchedulerFactory::create(const std::string& type, int
     if (type == "WFQ") {
         return std::make_unique<WFQScheduler>();
     }
-
+    if (type == "ADAPTIVE") {
+        return std::make_unique<AdaptiveScheduler>();
+    }
     // Default fallback
     return std::make_unique<FIFOScheduler>();
 }

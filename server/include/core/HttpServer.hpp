@@ -7,8 +7,10 @@
 #include "core/Socket.hpp"
 #include "scheduler/Scheduler.hpp"
 #include "threadpool/ThreadPool.hpp"
+#include "monitor/Logger.hpp"
 
 class HttpServer {
+    std::unique_ptr<Logger> logger;
 public:
     HttpServer(int port, int threadCount);
     ~HttpServer();

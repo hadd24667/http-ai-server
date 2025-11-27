@@ -35,6 +35,12 @@ ThreadPool::~ThreadPool() {
         if (worker.joinable()) worker.join();
 }
 
+std::size_t ThreadPool::getPendingTaskCount() const {
+    std::lock_guard<std::mutex> lock(mutexQueue);
+    return tasks.size();
+}
+
+
 void ThreadPool::enqueue(std::function<void()> task) {
     std::cout << "[DEBUG] Enqueuing task\n";
     {

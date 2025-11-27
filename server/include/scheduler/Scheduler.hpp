@@ -18,4 +18,9 @@ public:
     // Optional: for WFQ
     virtual void updateWeights(int newWeight) {}
 
+    // dùng cho log; default cho fixed scheduler
+    virtual std::string currentAlgorithm() const {
+        return "FIXED";
+    }
+
 };

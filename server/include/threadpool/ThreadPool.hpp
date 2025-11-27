@@ -13,6 +13,7 @@ public:
     ~ThreadPool();
 
     void enqueue(std::function<void()> task);
+    std::size_t getPendingTaskCount() const;
 
 private:
     std::vector<std::thread> workers;

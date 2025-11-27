@@ -11,6 +11,9 @@
 #include <cstring>
 #include <iostream>
 #include <thread>
+#include <chrono>
+#include <ctime>
+#include <sstream>
 
 // =======================
 //  Helpers
@@ -43,7 +46,8 @@ HttpServer::HttpServer(int port, int threadCount)
     threadPool = std::make_unique<ThreadPool>(threadCount);
 
     // DÙNG FACTORY CHUẨN — chọn thuật toán theo config
-    scheduler = SchedulerFactory::create("FIFO");
+    scheduler = SchedulerFactory::create("ADAPTIVE");
+    logger = std::make_unique<Logger>("data/logs/http_server_log.csv");
 }
 
 // Đọc raw HTTP request 1 lần duy nhất
@@ -117,15 +121,43 @@ void HttpServer::start() {
         int weight = getWeightFromConfig();
 
         int currentTaskId = nextTaskId++;
+        
+        auto startTime = std::chrono::steady_clock::now();
 
         Task task(
             currentTaskId,
             est,
             weight,
-            [this, clientFd, req, currentTaskId]() {
-                std::cout << "[POOL] Executing task id=" << currentTaskId
-                          << " path=" << req.path << "\n";
+            [this, clientFd, req, currentTaskId, startTime]() {
+                auto t0 = startTime;
+
                 handleClient(clientFd, req);
+
+                auto t1 = std::chrono::steady_clock::now();
+                double respMs =
+                    std::chrono::duration<double, std::milli>(t1 - t0).count();
+
+                double cpu = SystemMetrics::getCpuUsage();
+                std::size_t queueLen = threadPool->getPendingTaskCount();
+                std::size_t reqSize = req.path.size();  // hoặc raw.size()
+
+                std::string algo = scheduler->currentAlgorithm();
+
+                if (logger) {
+                    LogEntry e;
+                    e.timestamp = nowIso8601();
+                    e.cpu = cpu;
+                    e.queue_len = queueLen;
+                    e.req_size = reqSize;
+                    e.algorithm_used = algo;
+                    e.response_time_ms = respMs;
+                    logger->log(e);
+                }
+
+                std::cout << "[LOG] cpu=" << cpu
+                        << " q=" << queueLen
+                        << " alg=" << algo
+                        << " rt=" << respMs << "ms\n";
             }
         );
 
@@ -200,4 +232,16 @@ void HttpServer::handleClient(int clientSocketFd, const Request& req) {
     std::cout << "[DEBUG] calling close()\n";
     close(clientSocketFd);
     std::cout << "[DEBUG] closed client socket\n";
+}
+
+static std::string nowIso8601() {
+    using namespace std::chrono;
+    auto now = system_clock::now();
+    std::time_t t = system_clock::to_time_t(now);
+    std::tm tm{};
+    localtime_r(&t, &tm);
+
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%dT%H:%M:%S");
+    return oss.str();
 }
