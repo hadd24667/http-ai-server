@@ -4,22 +4,33 @@
 #include <fstream>
 
 struct LogEntry {
-    std::string timestamp;       // ISO-8601 hoặc đơn giản là epoch ms
-    double cpu = 0.0;
-    std::size_t queue_len = 0;
-    std::size_t req_size = 0;
-    std::string algorithm_used;
-    double response_time_ms = 0.0;
+    std::string timestamp;
+
+    double cpu;
+    std::size_t queue_len;
+
+    std::string request_method;
+    std::size_t request_path_length;
+    int estimated_workload;
+
+    std::string algo_at_enqueue;
+    std::string algo_at_run;
+
+    std::size_t req_size;
+    double response_time_ms;
+    double prev_latency_avg;
 };
 
 class Logger {
 public:
-    explicit Logger(const std::string& filePath);
+    Logger(const std::string& filePath);
     ~Logger();
 
-    void log(const LogEntry& entry);
+    void log(const LogEntry& e);
+    void flush();
 
 private:
-    std::mutex mtx;
     std::ofstream file;
+    std::mutex mtx;
+    int counter = 0;
 };

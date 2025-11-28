@@ -1,8 +1,8 @@
 #include "scheduler/AdaptiveScheduler.hpp"
-#include "scheduler/FifoScheduler.hpp"
-#include "scheduler/SjfScheduler.hpp"
-#include "scheduler/RrScheduler.hpp"
-#include "scheduler/WfqScheduler.hpp"
+#include "scheduler/FIFOScheduler.hpp"
+#include "scheduler/SJFScheduler.hpp"
+#include "scheduler/RRScheduler.hpp"
+#include "scheduler/WFQScheduler.hpp"
 #include "monitor/SystemMetrics.hpp"
 
 // TODO: tuỳ bạn define RR timeslice
@@ -11,21 +11,21 @@ static constexpr int RR_TIMESLICE = 5;
 AdaptiveScheduler::AdaptiveScheduler()
 {
     algoName = "FIFO";
-    inner = std::make_unique<FifoScheduler>();
+    inner = std::make_unique<FIFOScheduler>();
 }
 
 std::unique_ptr<Scheduler> AdaptiveScheduler::makeScheduler(const std::string& name) {
     if (name == "FIFO") {
-        return std::make_unique<FifoScheduler>();
+        return std::make_unique<FIFOScheduler>();
     } else if (name == "SJF") {
-        return std::make_unique<SjfScheduler>();
+        return std::make_unique<SJFScheduler>();
     } else if (name == "RR") {
-        return std::make_unique<RrScheduler>(RR_TIMESLICE);
+        return std::make_unique<RRScheduler>(RR_TIMESLICE);
     } else if (name == "WFQ") {
-        return std::make_unique<WfqScheduler>();
+        return std::make_unique<WFQScheduler>();
     }
     // fallback
-    return std::make_unique<FifoScheduler>();
+    return std::make_unique<FIFOScheduler>();
 }
 
 std::string AdaptiveScheduler::currentAlgorithm() const {
@@ -55,19 +55,19 @@ void AdaptiveScheduler::maybeSwitchStrategy(double cpu, std::size_t queueLen) {
 }
 
 void AdaptiveScheduler::enqueue(const Task& task) {
-    // Đo CPU + queueLen hiện tại để quyết định
-    double cpu = SystemMetrics::getCpuUsage();
-    // queueLen: tạm thời dùng workload (hoặc hook từ ngoài vào nếu cần)
-    // ở đây AdaptiveScheduler tự không biết queueLen của ThreadPool,
-    // nên bạn có thể inject queueLen từ HttpServer thay vì đo ở đây.
-    std::size_t queueLen = 0; // sẽ set từ ngoài nếu muốn
-
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        maybeSwitchStrategy(cpu, queueLen);
-        inner->enqueue(task);
-    }
+    enqueue(task, 0);
 }
+
+void AdaptiveScheduler::enqueue(const Task& task, std::size_t qlen) {
+    double cpu = SystemMetrics::getCpuUsage();
+
+    std::lock_guard<std::mutex> lock(mtx);
+    maybeSwitchStrategy(cpu, qlen);
+    lastChosenAlgo = algoName;   // thuật toán được chọn tại ENQUEUE
+
+
+    inner->enqueue(task);
+}   
 
 Task AdaptiveScheduler::dequeue() {
     std::lock_guard<std::mutex> lock(mtx);

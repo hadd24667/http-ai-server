@@ -1,51 +1,51 @@
 #include "threadpool/ThreadPool.hpp"
+#include "scheduler/Task.hpp"
 #include <iostream>
 
 ThreadPool::ThreadPool(int threads) : stop(false) {
     for (int i = 0; i < threads; i++) {
         workers.emplace_back([this]() {
             while (true) {
-                std::function<void()> task;
+                Task t;
 
                 {
-                    std::unique_lock<std::mutex> lock(mutexQueue);
-
+                    std::unique_lock<std::mutex> lock(mtx);
                     cv.wait(lock, [this]() {
                         return stop || !tasks.empty();
                     });
 
                     if (stop && tasks.empty()) return;
 
-                    task = std::move(tasks.front());
+                    t = tasks.top();
                     tasks.pop();
                 }
 
-                std::cout << "[DEBUG] Worker executing task\n";
-                task();
+                t.func();
             }
         });
     }
 }
 
 ThreadPool::~ThreadPool() {
-    stop = true;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        stop = true;
+    }
     cv.notify_all();
 
-    for (auto &worker : workers)
-        if (worker.joinable()) worker.join();
+    for (auto &w : workers)
+        if (w.joinable()) w.join();
+}
+
+void ThreadPool::enqueue(const Task& task) {
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        tasks.push(task);
+    }
+    cv.notify_one();
 }
 
 std::size_t ThreadPool::getPendingTaskCount() const {
-    std::lock_guard<std::mutex> lock(mutexQueue);
+    std::lock_guard<std::mutex> lock(mtx);
     return tasks.size();
-}
-
-
-void ThreadPool::enqueue(std::function<void()> task) {
-    std::cout << "[DEBUG] Enqueuing task\n";
-    {
-        std::lock_guard<std::mutex> lock(mutexQueue);
-        tasks.push(std::move(task));
-    }
-    cv.notify_one();
 }

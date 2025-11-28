@@ -1,39 +1,32 @@
 #pragma once
 #include "Scheduler.hpp"
 #include <queue>
-#include <cmath>
-#include <iostream>
+#include <vector>
 
 class WFQScheduler : public Scheduler {
-private:
-    struct Node {
-        Task task;
-        double finishTime;
-    };
+public:
+    std::string currentAlgorithm() const override { return "WFQ"; }
 
-    struct Compare {
-        bool operator()(const Node& a, const Node& b) const {
-            return a.finishTime > b.finishTime;
+    struct Cmp {
+        bool operator()(const Task& a, const Task& b) const {
+            return (a.estimatedTime * a.weight) > (b.estimatedTime * b.weight);
         }
     };
 
-    double virtualTime = 0;
-    std::priority_queue<Node, std::vector<Node>, Compare> pq;
+    void enqueue(const Task& task, std::size_t queueLen) override {
+        pq.push(task);
+    }
 
-public:
     void enqueue(const Task& task) override {
-                double finish = virtualTime + (double)task.estimatedTime / task.weight;
-                std::cout << "[SCHED] enqueue WFQ id=" << task.id 
-                    << " weight=" << task.weight 
-                    << " finishTime=" << finish << "\n";
-                pq.push({task, finish});
+        pq.push(task);
     }
 
     Task dequeue() override {
-        Node n = pq.top();
+        Task t = pq.top();
         pq.pop();
-        virtualTime = n.finishTime;
-        std::cout << "[SCHED] dequeue WFQ -> task id=" << n.task.id << "\n";
-        return n.task;
+        return t;
     }
+
+private:
+    std::priority_queue<Task, std::vector<Task>, Cmp> pq;
 };

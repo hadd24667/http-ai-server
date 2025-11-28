@@ -23,6 +23,8 @@ private:
     int threadCount;
     bool isRunning;
     int nextTaskId;
+    double latencyAvg = 0.0;
+
 
     std::unique_ptr<Socket> serverSocket;
     std::unique_ptr<ThreadPool> threadPool;

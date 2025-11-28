@@ -1,8 +1,11 @@
 #pragma once
-#include <cstdint>
+#include <atomic>
 
 class SystemMetrics {
 public:
-    // Trả về CPU usage (%) trong khoảng 0–100
+    static void init();
     static double getCpuUsage();
+
+private:
+    static std::atomic<double> CPU_CACHE;
 };

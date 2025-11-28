@@ -1,38 +1,37 @@
 #pragma once
 #include "Scheduler.hpp"
-#include <iostream>
 #include <queue>
 
 class RRScheduler : public Scheduler {
-private:
-    std::queue<Task> q;
-    int timeSlice;
-
 public:
-     RRScheduler(int ts) : timeSlice(ts) {}
+    explicit RRScheduler(int ts) : timeslice(ts) {}
 
-    void setTimeSlice(int ts) override {
-        timeSlice = ts;
+    std::string currentAlgorithm() const override { return "RR"; }
+
+    void setTimeSlice(int ts) override { timeslice = ts; }
+
+    void enqueue(const Task& task, std::size_t queueLen) override {
+        queue.push(task);
     }
 
     void enqueue(const Task& task) override {
-        std::cout << "[SCHED] RR dequeue id=" << task.id 
-          << " remain=" << task.remainingTime << "\n";
-        q.push(task);
+        queue.push(task);
     }
 
     Task dequeue() override {
-        Task t = q.front();
-        q.pop();
+        Task t = queue.front();
+        queue.pop();
 
-        // Giảm thời gian còn lại
-        int exec = std::min(timeSlice, t.remainingTime);
-        t.remainingTime -= exec;
+        // giảm remainingTime
+        t.remainingTime -= timeslice;
+        if (t.remainingTime > 0) {
+            queue.push(t);
+        }
 
-        if (t.remainingTime > 0)
-            q.push(t);  // tái xếp cuối hàng
-
-        std::cout << "[SCHED] dequeue RR -> task id=" << t.id << "\n";
         return t;
     }
+
+private:
+    int timeslice;
+    std::queue<Task> queue;
 };

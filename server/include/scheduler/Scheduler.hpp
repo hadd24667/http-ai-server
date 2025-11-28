@@ -1,6 +1,7 @@
 #pragma once
 #include "Task.hpp"
 #include <memory>
+#include <string>
 
 class Scheduler {
 public:
@@ -8,6 +9,11 @@ public:
 
     // Add new task to scheduler queue
     virtual void enqueue(const Task& task) = 0;
+
+    virtual void enqueue(const Task& task, std::size_t queueLen) {
+    // default: gọi hàm cũ (để không phá các scheduler khác)
+    enqueue(task);
+    }
 
     // Pop next task based on scheduling policy
     virtual Task dequeue() = 0;
@@ -18,9 +24,6 @@ public:
     // Optional: for WFQ
     virtual void updateWeights(int newWeight) {}
 
-    // dùng cho log; default cho fixed scheduler
-    virtual std::string currentAlgorithm() const {
-        return "FIXED";
-    }
+    virtual std::string currentAlgorithm() const = 0;
 
 };

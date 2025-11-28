@@ -1,23 +1,25 @@
 #pragma once
 #include "Scheduler.hpp"
-#include <iostream>
 #include <queue>
 
 class FIFOScheduler : public Scheduler {
-private:
-    std::queue<Task> q;
-
 public:
-   void enqueue(const Task& task) override {
-    std::cout << "[SCHED] enqueue FIFO task id=" << task.id << "\n";
-    q.push(task);
-}
+    std::string currentAlgorithm() const override { return "FIFO"; }
+
+    void enqueue(const Task& task, std::size_t queueLen) override {
+        queue.push(task);
+    }
+
+    void enqueue(const Task& task) override {
+        queue.push(task);
+    }
 
     Task dequeue() override {
-        Task t = q.front();
-        q.pop();
-        std::cout << "[SCHED] dequeue FIFO -> task id=" << t.id << "\n";
+        Task t = queue.front();
+        queue.pop();
         return t;
     }
 
+private:
+    std::queue<Task> queue;
 };
