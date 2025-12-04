@@ -1,51 +1,61 @@
 #include "threadpool/ThreadPool.hpp"
-#include "scheduler/Task.hpp"
 #include <iostream>
+#include <chrono>
 
-ThreadPool::ThreadPool(int threads) : stop(false) {
-    for (int i = 0; i < threads; i++) {
+ThreadPool::ThreadPool(int threads, Scheduler* scheduler)
+    : scheduler(scheduler), stop(false)
+{
+    if (!scheduler) {
+        throw std::runtime_error("ThreadPool requires a non-null Scheduler*");
+    }
+
+    for (int i = 0; i < threads; ++i) {
         workers.emplace_back([this]() {
-            while (true) {
-                Task t;
-
-                {
-                    std::unique_lock<std::mutex> lock(mtx);
-                    cv.wait(lock, [this]() {
-                        return stop || !tasks.empty();
-                    });
-
-                    if (stop && tasks.empty()) return;
-
-                    t = tasks.top();
-                    tasks.pop();
-                }
-
-                t.func();
-            }
+            workerLoop();
         });
     }
 }
 
 ThreadPool::~ThreadPool() {
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        stop = true;
+    stop.store(true, std::memory_order_relaxed);
+
+    // Ở thiết kế hiện tại, scheduler->dequeue() có thể block hoặc không.
+    // Nếu không block và trả Task “rỗng” khi hết việc, bạn có thể break loop phía dưới.
+    for (auto& w : workers) {
+        if (w.joinable()) {
+            w.join();
+        }
     }
-    cv.notify_all();
-
-    for (auto &w : workers)
-        if (w.joinable()) w.join();
 }
 
-void ThreadPool::enqueue(const Task& task) {
-    {
-        std::lock_guard<std::mutex> lock(mtx);
-        tasks.push(task);
+void ThreadPool::workerLoop() {
+    while (true) {
+        Task t;
+
+        {
+            std::unique_lock<std::mutex> lock(queueMutex);
+
+            // Chờ đến khi có task thật sự trong ThreadPool
+            cv.wait(lock, [this]() {
+                return stop.load(std::memory_order_relaxed) ||
+                    !scheduler->empty();
+            });
+            if (stop.load(std::memory_order_relaxed))
+                return;
+
+            // lấy task từ scheduler
+            t = scheduler->dequeue();
+        }
+
+        // chạy task
+        if (t.func) {
+            t.func();
+        }
+
+        // giảm task pending
+        pendingTasks.fetch_sub(1, std::memory_order_relaxed);
     }
-    cv.notify_one();
 }
 
-std::size_t ThreadPool::getPendingTaskCount() const {
-    std::lock_guard<std::mutex> lock(mtx);
-    return tasks.size();
-}
+
+

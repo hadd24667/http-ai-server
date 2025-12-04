@@ -1,29 +1,34 @@
 #pragma once
+
 #include "Task.hpp"
-#include <memory>
 #include <string>
+#include <cstddef>
 
 class Scheduler {
 public:
     virtual ~Scheduler() = default;
 
-    // Add new task to scheduler queue
+    // Thêm task mới vào queue
     virtual void enqueue(const Task& task) = 0;
 
+    // Overload có queueLen (dùng cho Adaptive); mặc định bỏ qua
     virtual void enqueue(const Task& task, std::size_t queueLen) {
-    // default: gọi hàm cũ (để không phá các scheduler khác)
-    enqueue(task);
+        (void)queueLen;
+        enqueue(task);
     }
 
-    // Pop next task based on scheduling policy
+    // Lấy task tiếp theo theo chính sách lập lịch
     virtual Task dequeue() = 0;
 
-    // Optional: for RR (you can override if needed)
-    virtual void setTimeSlice(int ts) {}
+    // Cho biết scheduler còn task hay không
+    virtual bool empty() const = 0;
 
-    // Optional: for WFQ
-    virtual void updateWeights(int newWeight) {}
+    // Optional: cho RR (nếu cần)
+    virtual void setTimeSlice(int /*ts*/) {}
 
+    // Optional: cho WFQ (nếu cần)
+    virtual void updateWeights(int /*newWeight*/) {}
+
+    // Tên thuật toán hiện tại (FIFO/SJF/RR/WFQ/ADAPTIVE...)
     virtual std::string currentAlgorithm() const = 0;
-
 };

@@ -1,8 +1,9 @@
 #pragma once
+
 #include "scheduler/Scheduler.hpp"
 #include <memory>
-#include <string>
 #include <mutex>
+#include <string>
 
 class AdaptiveScheduler : public Scheduler {
 public:
@@ -16,18 +17,23 @@ public:
 
     Task dequeue() override;
 
+    bool empty() const override;
+
+    void setTimeSlice(int ts) override;
+    void updateWeights(int newWeight) override;
+
 private:
     // Scheduler đang active (FIFO/SJF/RR/WFQ)
-    std::unique_ptr<Scheduler> inner;
+    std::unique_ptr<Scheduler> inner_;
 
     // tên thuật toán hiện tại (được chọn sau khi switch)
-    std::string algoName;
+    std::string algoName_;
 
-    // thuật toán được chọn ngay thời điểm enqueue
-    std::string lastChosenAlgo;
+    // thuật toán được chọn ngay thời điểm enqueue (log thôi)
+    std::string lastChosenAlgo_;
 
     // đồng bộ hoá
-    mutable std::mutex mtx;
+    mutable std::mutex mtx_;
 
     // rule-based switching
     void maybeSwitchStrategy(double cpu, std::size_t queueLen);

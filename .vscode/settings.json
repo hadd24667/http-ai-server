@@ -1,11 +1,9 @@
 {
     "editor.formatOnSave": true,
     "C_Cpp.clang_format_style": "file",
-
-    "[python]": { 
-        "editor.defaultFormatter": "ms-python.black-formatter" 
+    "[python]": {
+        "editor.defaultFormatter": "ms-python.black-formatter"
     },
-
     "cmake.configureOnOpen": false,
     "cmake.buildDirectory": "${workspaceFolder}/build",
     "files.associations": {
@@ -69,6 +67,7 @@
         "thread": "cpp",
         "cinttypes": "cpp",
         "typeinfo": "cpp",
-        "valarray": "cpp"
+        "valarray": "cpp",
+        "netfwd": "cpp"
     }
 }

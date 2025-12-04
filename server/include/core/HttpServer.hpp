@@ -10,7 +10,6 @@
 #include "monitor/Logger.hpp"
 
 class HttpServer {
-    std::unique_ptr<Logger> logger;
 public:
     HttpServer(int port, int threadCount);
     ~HttpServer();
@@ -19,24 +18,25 @@ public:
     void stop();
 
 private:
+    std::string readRequestBlocking(int clientFd);
+    int estimateTaskWorkload(const Request& req);
+    int getWeightFromConfig();
+    void handleClient(int clientSocketFd, const Request& req);
+
+private:
     int port;
     int threadCount;
     bool isRunning;
     int nextTaskId;
-    double latencyAvg = 0.0;
-
 
     std::unique_ptr<Socket> serverSocket;
-    std::unique_ptr<ThreadPool> threadPool;
+
+    // IMPORTANT: scheduler phải khai báo trước threadPool
     std::unique_ptr<Scheduler> scheduler;
 
-    // ===== Helper functions =====
-    std::string readRequestBlocking(int clientFd);
-    int estimateTaskWorkload(const Request& req);
-    int getWeightFromConfig();
+    std::unique_ptr<ThreadPool> threadPool;
+    std::unique_ptr<Logger> logger;
 
-    void handleClient(int clientSocketFd, const Request& req);
-
-    // Not used anymore, but keep to avoid linker errors
-    void acceptLoop();
+    double latencyAvg;
+    std::atomic<std::size_t> pendingTasks{0};
 };

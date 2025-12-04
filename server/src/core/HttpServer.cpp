@@ -15,6 +15,8 @@
 #include <iomanip>
 #include <thread>
 #include <chrono>
+#include <errno.h>
+#include <string.h>
 #include <ctime>
 #include <fcntl.h>
 #include <sstream>
@@ -29,16 +31,23 @@
 
 static void sendAll(int fd, const char* data, size_t len) {
     size_t total = 0;
+
     while (total < len) {
-        ssize_t sent = send(fd, data + total, len - total, 0);
-        if (sent <= 0) {
-            std::cout << "[SEND] send() failed or client closed\n";
-            return;
+        // MSG_NOSIGNAL: không bắn SIGPIPE nếu client đã đóng
+        ssize_t sent = send(fd, data + total, len - total, MSG_NOSIGNAL);
+        if (sent < 0) {
+            std::cout << "[SEND] send() failed: errno=" << errno
+                      << " (" << std::strerror(errno) << ")\n";
+            break;
         }
+        if (sent == 0) {
+            std::cout << "[SEND] send() returned 0, client closed?\n";
+            break;
+        }
+
         total += static_cast<size_t>(sent);
-        std::cout << "[SEND] sent=" << sent
-                  << " total=" << total
-                  << "/" << len << "\n";
+        // Nếu log nhiều quá muốn nhẹ hơn thì comment block này đi
+        // std::cout << "[SEND] sent=" << sent << " total=" << total << "/" << len << "\n";
     }
 }
 
@@ -64,11 +73,15 @@ HttpServer::HttpServer(int port, int threadCount)
       latencyAvg(0.0)
 {
     serverSocket = std::make_unique<Socket>();
-    threadPool   = std::make_unique<ThreadPool>(threadCount);
 
-    // DÙNG FACTORY CHUẨN — chọn thuật toán theo config
+    // 1) Tạo scheduler trước
     scheduler = SchedulerFactory::create("ADAPTIVE");
-    logger    = std::make_unique<Logger>("data/logs/http_server_log.csv");
+
+    // 2) ThreadPool nhận con trỏ scheduler – pull-mode
+    threadPool = std::make_unique<ThreadPool>(threadCount, scheduler.get());
+
+    // 3) logger
+    logger = std::make_unique<Logger>("data/logs/http_server_log.csv");
 }
 
 // Đọc raw HTTP request: loop đến khi có đủ header (\r\n\r\n) hoặc timeout
@@ -185,16 +198,22 @@ void HttpServer::start() {
 
         auto startTime = std::chrono::steady_clock::now();
 
-        // Lấy thuật toán hiện tại TRƯỚC KHI enqueue (algo_at_enqueue)
+        // ===== TẠO TASK =====
+
+        // 1) Tăng pendingTasks TẠI THỜI ĐIỂM ENQUEUE
+        std::size_t qLenAtEnqueue = threadPool->incrementPendingTasks();
+
+        // 2) Lấy thuật toán tại enqueue
         std::string algo_enqueue = scheduler->currentAlgorithm();
 
-        // ===== TẠO TASK =====
+        // 3) Tạo Task
         Task task(
             currentTaskId,
             est,
             weight,
-            // capture đầy đủ: this, clientFd, req, startTime, est, algo_enqueue
-            [this, clientFd, req, startTime, est, algo_enqueue]() {
+            algo_enqueue,
+            [this, clientFd, req, startTime, est, algo_enqueue, qLenAtEnqueue]() {
+
                 auto t0 = startTime;
 
                 // Xử lý request
@@ -204,29 +223,27 @@ void HttpServer::start() {
                 double respMs =
                     std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-                // Cập nhật moving average latency (EWMA)
+                // EWMA latency
                 this->latencyAvg = this->latencyAvg * 0.9 + respMs * 0.1;
 
                 double       cpu      = SystemMetrics::getCpuUsage();
-                std::size_t  queueLen = this->threadPool->getPendingTaskCount();
-                std::size_t  reqSize  = req.path.size();  // hoặc raw.size()
+                std::size_t  reqSize  = req.path.size();
 
-                // Thuật toán thực sự đang active tại thời điểm RUN
+                // ✨ GIỮ NGUYÊN queue_len TẠI ENQUEUE (không lấy pendingTasks ở đây)
+                std::size_t queueLen = qLenAtEnqueue;
+
                 std::string algo_run = this->scheduler->currentAlgorithm();
 
                 if (this->logger) {
                     LogEntry e;
                     e.timestamp            = nowIso8601();
                     e.cpu                  = cpu;
-                    e.queue_len            = queueLen;
-
-                    e.request_method       = req.method;      // ví dụ: "GET"
-                    e.request_path_length  = req.path.size(); // độ dài path
-                    e.estimated_workload   = est;             // từ estimateTaskWorkload
-
-                    e.algo_at_enqueue      = algo_enqueue;    // algo lúc enqueue
-                    e.algo_at_run          = algo_run;        // algo lúc run
-
+                    e.queue_len            = queueLen;            // ✔ QUEUE LEN ĐÚNG
+                    e.request_method       = req.method;
+                    e.request_path_length  = req.path.size();
+                    e.estimated_workload   = est;
+                    e.algo_at_enqueue      = algo_enqueue;
+                    e.algo_at_run          = algo_run;
                     e.req_size             = reqSize;
                     e.response_time_ms     = respMs;
                     e.prev_latency_avg     = this->latencyAvg;
@@ -235,28 +252,21 @@ void HttpServer::start() {
                 }
 
                 std::cout << "[LOG] cpu=" << cpu
-                          << " q=" << queueLen
-                          << " algo_enqueue=" << algo_enqueue
-                          << " algo_run=" << algo_run
-                          << " rt=" << respMs << "ms"
-                          << " latAvg=" << this->latencyAvg << "ms\n";
+                        << " q=" << queueLen
+                        << " algo_enqueue=" << algo_enqueue
+                        << " algo_run=" << algo_run
+                        << " rt=" << respMs << "ms"
+                        << " latAvg=" << this->latencyAvg << "ms\n";
             }
         );
 
-        std::cout << "[SCHED] enqueue task id=" << currentTaskId
-                  << " est=" << est
-                  << " weight=" << weight << "\n";
+        // == CHỈ GỌI 1 LẦN ==
+        // KHÔNG pendingTasks.fetch_add() ở đây nữa
 
-        // Lấy queueLen hiện tại của ThreadPool để đưa cho AdaptiveScheduler
-        std::size_t qlen = threadPool->getPendingTaskCount();
-        scheduler->enqueue(task, qlen);
+        // ==== gọi enqueue đúng:
+        scheduler->enqueue(task, qLenAtEnqueue);
+        threadPool->notifyWorker();       // <-- Đánh thức worker tại đây
 
-        // Với thiết kế đơn giản hiện tại, ta dequeue ngay 1 task và đưa cho ThreadPool
-        Task next = scheduler->dequeue();
-        std::cout << "[SCHED] dequeue -> task id=" << next.id << "\n";
-
-        // ThreadPool dùng Task
-        threadPool->enqueue(next);
     }
 }
 
@@ -264,11 +274,6 @@ void HttpServer::stop() {
     isRunning = false;
     serverSocket->closeSocket();
     std::cout << "[SERVER] Stopped.\n";
-}
-
-// Giờ acceptLoop không dùng nữa, nhưng nếu header còn khai báo thì có thể để dummy
-void HttpServer::acceptLoop() {
-    // Không dùng nữa vì đã tích hợp logic vào start()
 }
 
 // handleClient KHÔNG recv, KHÔNG parse lại – chỉ xử lý theo Request đã có
@@ -295,6 +300,51 @@ void HttpServer::handleClient(int clientSocketFd, const Request& req) {
         std::cout << "[DEBUG] closed client socket (favicon)\n";
         return;
     }
+
+        // =======================
+    //  SMART WORKLOAD ENGINE
+    // =======================
+
+    // tăng hệ số để CPU dễ chạm 50–90%
+    static double loadFactor = 20000.0;  // khởi đầu
+    int w = std::max(1, (int)req.path.size());
+
+    volatile long dummy = 0;
+    long iterations = (long)(w * loadFactor);
+
+    // đo thời gian CPU bận cho workload này
+    auto t0 = std::chrono::steady_clock::now();
+
+    for (long i = 0; i < iterations; ++i) {
+        dummy += i;
+    }
+
+    auto t1 = std::chrono::steady_clock::now();
+    double busySec = std::chrono::duration<double>(t1 - t0).count();
+
+    // báo busy-time cho SystemMetrics
+    SystemMetrics::addBusy(busySec);
+
+    // lấy CPU tổng hợp
+    double cpu = SystemMetrics::getCpuUsage();
+
+    // Nếu CPU quá thấp → tăng loadFactor
+    if (cpu < 30.0) {
+        loadFactor *= 1.10;  // tăng nhẹ 10%
+    }
+    // Nếu CPU quá cao → giảm loadFactor
+    else if (cpu > 85.0) {
+        loadFactor *= 0.85;  // giảm 15%
+    }
+
+    // Giới hạn loadFactor để tránh quá to / quá nhỏ
+    if (loadFactor < 5000.0)     loadFactor = 5000.0;
+    if (loadFactor > 200000.0)   loadFactor = 200000.0;
+
+    std::cout << "[LOAD] cpu=" << cpu
+              << " loadFactor=" << loadFactor
+              << " pathLen=" << w
+              << " busySec=" << busySec << "\n";
 
     // Normal response
     Response res;
