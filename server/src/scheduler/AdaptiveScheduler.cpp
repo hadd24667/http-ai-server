@@ -5,104 +5,167 @@
 #include "scheduler/WFQScheduler.hpp"
 #include "monitor/SystemMetrics.hpp"
 
-#include <utility>
+#include <numeric>
+#include <algorithm>
 
-static constexpr int DEFAULT_RR_TIMESLICE = 5;
+// ================================
+//  THAM SỐ ADAPTIVE MỚI
+// ================================
+static constexpr int RR_TIMESLICE_DEFAULT = 5;
 
+// Cửa sổ trượt để đo biến thiên workload (path length)
+static constexpr int WORKLOAD_WINDOW = 40;
+
+
+// ================================
+//  Constructor
+// ================================
 AdaptiveScheduler::AdaptiveScheduler() {
     algoName_ = "FIFO";
     inner_    = std::make_unique<FIFOScheduler>();
 }
 
+
+// ================================
+//  current algo
+// ================================
 std::string AdaptiveScheduler::currentAlgorithm() const {
     std::lock_guard<std::mutex> lock(mtx_);
     return algoName_;
 }
 
-void AdaptiveScheduler::setTimeSlice(int ts) {
-    std::lock_guard<std::mutex> lock(mtx_);
-    if (auto* rr = dynamic_cast<RRScheduler*>(inner_.get())) {
-        rr->setTimeSlice(ts);
+
+// ================================
+//  Helper: Tính độ biến thiên workload
+//  Mục đích: 
+//    - workload ít biến thiên → SJF tốt
+//    - workload biến thiên mạnh → RR/WFQ tốt
+// ================================
+double AdaptiveScheduler::workloadVariability() {
+    std::lock_guard<std::mutex> lock(wloadMtx_);
+
+    if (recentWorkloads_.size() < 5) return 0.0;
+
+    double avg = std::accumulate(recentWorkloads_.begin(),
+                                 recentWorkloads_.end(), 0.0)
+                 / recentWorkloads_.size();
+
+    double var = 0.0;
+    for (double w : recentWorkloads_) {
+        var += (w - avg) * (w - avg);
     }
+    var /= recentWorkloads_.size();
+    return var;    // variance
 }
 
-void AdaptiveScheduler::updateWeights(int /*newWeight*/) {
-    // Nếu sau này bạn muốn propagate xuống WFQ thì chỉnh ở đây.
+
+// ================================
+//  Adaptive decision
+// ================================
+std::string AdaptiveScheduler::decideAlgorithm(double cpu,
+                                               std::size_t qlen,
+                                               double wvar)
+{
+    // ---------------------------
+    // 1) Load rất nhỏ → FIFO
+    // ---------------------------
+    if (qlen < 20 && cpu < 40.0) {
+        return "FIFO";
+    }
+
+    // ---------------------------
+    // 2) Workload ít biến thiên
+    //    + CPU chưa quá cao → SJF
+    // ---------------------------
+    if (wvar < 200.0 && cpu < 70.0) {
+        return "SJF";
+    }
+
+    // ---------------------------
+    // 3) CPU cao → RR
+    //    (nhưng queue chưa phình)
+    // ---------------------------
+    if (cpu >= 70.0 && cpu < 85.0 && qlen < 200) {
+        return "RR";
+    }
+
+    // ---------------------------
+    // 4) CPU rất cao + queue phình lớn → WFQ
+    // ---------------------------
+    if (cpu >= 85.0 || qlen >= 200) {
+        return "WFQ";
+    }
+
+    // fallback tự nhiên
+    return "SJF";
 }
 
-std::unique_ptr<Scheduler> AdaptiveScheduler::makeScheduler(const std::string& name) {
-    if (name == "FIFO") {
-        return std::make_unique<FIFOScheduler>();
-    }
-    if (name == "SJF") {
-        return std::make_unique<SJFScheduler>();
-    }
-    if (name == "RR") {
-        return std::make_unique<RRScheduler>(DEFAULT_RR_TIMESLICE);
-    }
-    if (name == "WFQ") {
-        return std::make_unique<WFQScheduler>();
-    }
-    // fallback
+
+// ================================
+//  Scheduler factory
+// ================================
+std::unique_ptr<Scheduler> AdaptiveScheduler::make(const std::string& name) {
+    if (name == "FIFO") return std::make_unique<FIFOScheduler>();
+    if (name == "SJF")  return std::make_unique<SJFScheduler>();
+    if (name == "RR")   return std::make_unique<RRScheduler>(RR_TIMESLICE_DEFAULT);
+    if (name == "WFQ")  return std::make_unique<WFQScheduler>();
     return std::make_unique<FIFOScheduler>();
 }
 
-void AdaptiveScheduler::maybeSwitchStrategy(double cpu, std::size_t queueLen) {
-    // Rule đơn giản:
-    // - Nhẹ, ít queue -> FIFO
-    // - Queue dài nhưng CPU chưa quá cao -> SJF
-    // - CPU cao -> RR
-    // - CPU rất cao + queue dài -> WFQ
-    std::string target = algoName_;
 
-    if (queueLen < 5 && cpu < 50.0) {
-        target = "FIFO";
-    } else if (queueLen >= 5 && cpu < 80.0) {
-        target = "SJF";
-    } else if (cpu >= 80.0 && queueLen < 20) {
-        target = "RR";
-    } else if (cpu >= 80.0 && queueLen >= 20) {
-        target = "WFQ";
-    }
-
-    if (target == algoName_) {
-        return;
-    }
-
-    inner_    = makeScheduler(target);
-    algoName_ = target;
+// ================================
+//  enqueue(x): nơi quyết định thuật toán
+// ================================
+void AdaptiveScheduler::enqueue(const Task& t) {
+    enqueue(t, 0);
 }
 
-void AdaptiveScheduler::enqueue(const Task& task) {
-    enqueue(task, 0);
-}
-
-void AdaptiveScheduler::enqueue(const Task& task, std::size_t queueLen) {
+void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
     double cpu = SystemMetrics::getCpuUsage();
 
-    std::lock_guard<std::mutex> lock(mtx_);
-    maybeSwitchStrategy(cpu, queueLen);
-    lastChosenAlgo_ = algoName_;
+    // record workload để đo biến thiên
+    {
+        std::lock_guard<std::mutex> lk(wloadMtx_);
+        recentWorkloads_.push_back(t.estimatedTime);
+        if (recentWorkloads_.size() > WORKLOAD_WINDOW)
+            recentWorkloads_.erase(recentWorkloads_.begin());
+    }
 
-    inner_->enqueue(task);
+    // lấy variance
+    double wvar = workloadVariability();
+
+    // quyết định thuật toán
+    std::string target = decideAlgorithm(cpu, queueLen, wvar);
+
+    std::lock_guard<std::mutex> lock(mtx_);
+
+    if (target != algoName_) {
+        inner_    = make(target);
+        algoName_ = target;
+    }
+
+    // enqueue vào scheduler hiện tại
+    inner_->enqueue(t);
 }
 
+
+// ================================
+//  dequeue
+// ================================
 Task AdaptiveScheduler::dequeue() {
-    // Tránh giữ lock mtx_ trong khi chờ inner_->dequeue() (vì bên trong cũng dùng mutex/cv)
-    Scheduler* innerPtr = nullptr;
+    Scheduler* ptr = nullptr;
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        innerPtr = inner_.get();
+        ptr = inner_.get();
     }
-
-    if (!innerPtr) {
-        // Trường hợp rất hiếm: inner_ null, trả về Task rỗng
-        return Task{};
-    }
-
-    return innerPtr->dequeue();
+    if (!ptr) return Task{};
+    return ptr->dequeue();
 }
 
+
+// ================================
+//  empty()
+// ================================
 bool AdaptiveScheduler::empty() const {
     std::lock_guard<std::mutex> lock(mtx_);
     if (!inner_) return true;
