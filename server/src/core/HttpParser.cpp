@@ -48,17 +48,9 @@ Request HttpParser::parse(const std::string& raw) {
         req.headers[key] = value;
     }
 
-    // -------- Parse body (if any) --------
-    std::string body;
-    while (std::getline(stream, line)) {
-        trimCRLF(line);
-        body += line;
-        body.push_back('\n');
-    }
-
-    // remove last '\n'
-    if (!body.empty() && body.back() == '\n')
-        body.pop_back();
+    // -------- Parse body (read raw body exactly as received) --------
+    std::string body((std::istreambuf_iterator<char>(stream)),
+                    std::istreambuf_iterator<char>());
 
     req.body = body;
 

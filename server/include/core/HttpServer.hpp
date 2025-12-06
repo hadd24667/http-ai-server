@@ -2,12 +2,16 @@
 
 #include <memory>
 #include <string>
-
 #include "core/Request.hpp"
-#include "core/Socket.hpp"
-#include "scheduler/Scheduler.hpp"
-#include "threadpool/ThreadPool.hpp"
-#include "monitor/Logger.hpp"
+
+class Socket;
+class Scheduler;
+class ThreadPool;
+class Logger;
+
+// Forward declaration cho OpenSSL
+typedef struct ssl_st SSL;
+typedef struct ssl_ctx_st SSL_CTX;
 
 class HttpServer {
 public:
@@ -18,25 +22,34 @@ public:
     void stop();
 
 private:
-    std::string readRequestBlocking(int clientFd);
-    int estimateTaskWorkload(const Request& req);
-    int getWeightFromConfig();
-    void handleClient(int clientSocketFd, const Request& req);
+    int    port;
+    int    threadCount;
+    bool   isRunning;
+    int    nextTaskId;
+    double latencyAvg;
+
+    std::unique_ptr<Socket>    serverSocket;
+    std::unique_ptr<Scheduler> scheduler;
+    std::unique_ptr<ThreadPool> threadPool;
+    std::unique_ptr<Logger>    logger;
+
+    // SSL context cho HTTPS
+    SSL_CTX* sslCtx;
 
 private:
-    int port;
-    int threadCount;
-    bool isRunning;
-    int nextTaskId;
+    // Đọc HTTP request qua SSL
+    std::string readRequestBlockingSSL(SSL* ssl);
 
-    std::unique_ptr<Socket> serverSocket;
+    // Ước lượng workload cho scheduler
+    int estimateTaskWorkload(const Request& req);
+    int getWeightFromConfig();
 
-    // IMPORTANT: scheduler phải khai báo trước threadPool
-    std::unique_ptr<Scheduler> scheduler;
+    // Static files, router và handler
+    bool serveStaticFile(SSL* ssl, int clientFd, const std::string& path);
+    void handleClient(SSL* ssl, int clientSocketFd, const Request& req);
 
-    std::unique_ptr<ThreadPool> threadPool;
-    std::unique_ptr<Logger> logger;
-
-    double latencyAvg;
-    std::atomic<std::size_t> pendingTasks{0};
+    void handleGET(SSL* ssl, int clientFd, const Request& req);
+    void handlePOST(SSL* ssl, int clientFd, const Request& req);
+    void handlePUT(SSL* ssl, int clientFd, const Request& req);
+    void handleDELETE(SSL* ssl, int clientFd, const Request& req);
 };
