@@ -15,7 +15,7 @@ typedef struct ssl_ctx_st SSL_CTX;
 
 class HttpServer {
 public:
-    HttpServer(int port, int threadCount);
+    HttpServer(int port, int threadCount, const std::string& algo);
     ~HttpServer();
 
     void start();
@@ -27,6 +27,7 @@ private:
     bool   isRunning;
     int    nextTaskId;
     double latencyAvg;
+    std::string algoName;
 
     std::unique_ptr<Socket>    serverSocket;
     std::unique_ptr<Scheduler> scheduler;

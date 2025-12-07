@@ -5,23 +5,37 @@
 #include "scheduler/WFQScheduler.hpp"
 #include "scheduler/AdaptiveScheduler.hpp"
 
+#include <algorithm>
+#include <iostream>
 
-std::unique_ptr<Scheduler> SchedulerFactory::create(const std::string& type, int timeSlice) {
-    if (type == "FIFO") {
+
+std::unique_ptr<Scheduler> SchedulerFactory::create(const std::string& algoName) {
+    std::string name = algoName;
+    
+    // lowercase để dễ so sánh
+    std::transform(name.begin(), name.end(), name.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+
+    std::cout << "[SchedulerFactory] Creating scheduler: " << name << "\n";
+
+    if (name == "fifo") {
         return std::make_unique<FIFOScheduler>();
     }
-    if (type == "SJF") {
+    if (name == "sjf") {
         return std::make_unique<SJFScheduler>();
     }
-    if (type == "RR") {
-        return std::make_unique<RRScheduler>(timeSlice);
+    if (name == "rr" || name == "roundrobin") {
+        return std::make_unique<RRScheduler>();
     }
-    if (type == "WFQ") {
+    if (name == "wfq") {
         return std::make_unique<WFQScheduler>();
     }
-    if (type == "ADAPTIVE") {
+    if (name == "adaptive") {
         return std::make_unique<AdaptiveScheduler>();
     }
-    // Default fallback
-    return std::make_unique<FIFOScheduler>();
+
+    std::cout << "[SchedulerFactory] Unknown algo '" << algoName 
+              << "', fallback = ADAPTIVE\n";
+
+    return std::make_unique<AdaptiveScheduler>();
 }

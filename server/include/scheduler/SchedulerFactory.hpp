@@ -5,5 +5,5 @@
 
 class SchedulerFactory {
 public:
-    static std::unique_ptr<Scheduler> create(const std::string& type, int timeSlice = 1);
+    static std::unique_ptr<Scheduler> create(const std::string& algo);
 };

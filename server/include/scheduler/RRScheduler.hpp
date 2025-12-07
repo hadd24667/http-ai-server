@@ -7,7 +7,7 @@
 
 class RRScheduler : public Scheduler {
 public:
-    explicit RRScheduler(int timeSlice)
+    explicit RRScheduler(int timeSlice = 5)
         : timeSlice_(timeSlice) {}
 
     std::string currentAlgorithm() const override {
@@ -19,28 +19,29 @@ public:
     }
 
     void enqueue(const Task& task) override {
-        enqueue(task, 0);
-    }
-
-    void enqueue(const Task& task, std::size_t /*queueLen*/) override {
-        {
-            std::lock_guard<std::mutex> lock(mtx_);
-            queue_.push(task);
-        }
+        std::lock_guard<std::mutex> lock(mtx_);
+        queue_.push(task);
         cv_.notify_one();
     }
 
     Task dequeue() override {
         std::unique_lock<std::mutex> lock(mtx_);
-        cv_.wait(lock, [this]() {
+        cv_.wait(lock, [this] {
             return !queue_.empty();
         });
 
         Task t = queue_.front();
         queue_.pop();
 
-        // Với workload HTTP hiện tại, ta chạy task một lần rồi thôi.
-        // Nếu sau này bạn muốn RR "thật" với remainingTime thì chỉnh ở đây.
+        // ============================
+        // ROUND ROBIN CORE LOGIC
+        // ============================
+        if (t.remainingTime > timeSlice_) {
+            t.remainingTime -= timeSlice_;
+            queue_.push(t);               // push back as unfinished
+        } else {
+            t.remainingTime = 0;          // finished
+        }
 
         return t;
     }
@@ -52,7 +53,7 @@ public:
 
 private:
     int timeSlice_;
+    std::queue<Task> queue_;
     mutable std::mutex mtx_;
     std::condition_variable cv_;
-    std::queue<Task> queue_;
 };

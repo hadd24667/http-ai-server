@@ -68,18 +68,19 @@ static bool endsWith(const std::string& str, const std::string& suffix) {
     return std::equal(suffix.rbegin(), suffix.rend(), str.rbegin());
 }
 
-HttpServer::HttpServer(int port, int threadCount)
+HttpServer::HttpServer(int port, int threadCount, const std::string& algo)
     : port(port),
       threadCount(threadCount),
       isRunning(false),
       nextTaskId(0),
       latencyAvg(0.0),
-      sslCtx(nullptr)
+      sslCtx(nullptr),
+      algoName(algo)
 {
     serverSocket = std::make_unique<Socket>();
 
     // 1) Tạo scheduler
-    scheduler = SchedulerFactory::create("ADAPTIVE");
+    scheduler = SchedulerFactory::create(algoName);
 
     // 2) ThreadPool nhận scheduler – pull-mode
     threadPool = std::make_unique<ThreadPool>(threadCount, scheduler.get());
