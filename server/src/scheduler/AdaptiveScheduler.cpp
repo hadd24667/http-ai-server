@@ -23,6 +23,11 @@ static constexpr int WORKLOAD_WINDOW = 40;
 AdaptiveScheduler::AdaptiveScheduler() {
     algoName_ = "FIFO";
     inner_    = std::make_unique<FIFOScheduler>();
+
+    ai_ = std::make_unique<AIClient>(
+        "http://127.0.0.1:5000/predict",  // AI server
+        200                               // timeout ms
+    );
 }
 
 
@@ -107,33 +112,76 @@ void AdaptiveScheduler::enqueue(const Task& t) {
     enqueue(t, 0);
 }
 
+static int computeQueueBin(std::size_t q) {
+    if (q <= 5) return 0;
+    if (q <= 20) return 1;
+    if (q <= 50) return 2;
+    if (q <= 100) return 3;
+    if (q <= 200) return 4;
+    if (q <= 400) return 5;
+    return 6;
+}
+
 void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
     double cpu = SystemMetrics::getCpuUsage();
-
-    // record workload để đo biến thiên
-    {
-        std::lock_guard<std::mutex> lk(wloadMtx_);
-        recentWorkloads_.push_back(t.estimatedTime);
-        if (recentWorkloads_.size() > WORKLOAD_WINDOW)
-            recentWorkloads_.erase(recentWorkloads_.begin());
-    }
 
     // lấy variance
     double wvar = workloadVariability();
 
-    // quyết định thuật toán
-    std::string target = decideAlgorithm(cpu, queueLen, wvar);
+    std::string target;
 
-    std::lock_guard<std::mutex> lock(mtx_);
+    if (aiEnabled_ && ai_) {
+        auto now = std::chrono::steady_clock::now();
+        if (lastAiCall_ == std::chrono::steady_clock::time_point{} ||
+            now - lastAiCall_ >= aiMinInterval_) {
 
-    // đổi inner scheduler nếu cần
-    if (target != algoName_) {
-        inner_    = make(target);
-        algoName_ = target;
+            lastAiCall_ = now;
+
+            AIFeatures f;
+            f.cpu = cpu;
+            f.queue_len = queueLen;
+            f.queue_bin = computeQueueBin(queueLen);
+            f.request_method = t.request_method;
+            f.request_path_length = t.request_path_length;
+            f.estimated_workload = static_cast<double>(t.estimatedTime);
+            f.req_size = t.req_size;
+
+            auto pred = ai_->predict(f);
+            if (pred && !pred->empty()) {
+                target = *pred;  // "SJF", "RR", "WFQ", ...
+            }
+        }
     }
 
-    // enqueue vào scheduler hiện tại
-    inner_->enqueue(t);
+        // fallback nếu AI fail
+    if (target.empty()) {
+        target = decideAlgorithm(cpu, queueLen, wvar);
+    }
+
+    // ================================
+    //  (FIX) THỰC SỰ ENQUEUE TASK
+    // ================================
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+
+        // Không switch khi còn task, tránh "rơi task" trong inner cũ
+        if (inner_ && !inner_->empty()) {
+            // giữ nguyên algoName_ nếu đang có task chờ
+        } else {
+            if (!target.empty() && target != algoName_) {
+                inner_ = make(target);
+                algoName_ = target;
+            }
+        }
+
+        if (!inner_) {
+            inner_ = std::make_unique<FIFOScheduler>();
+            algoName_ = "FIFO";
+        }
+
+        inner_->enqueue(t);  // 🔥 DÒNG QUAN TRỌNG NHẤT
+    }
+
 }
 
 
@@ -159,3 +207,4 @@ bool AdaptiveScheduler::empty() const {
     if (!inner_) return true;
     return inner_->empty();
 }
+

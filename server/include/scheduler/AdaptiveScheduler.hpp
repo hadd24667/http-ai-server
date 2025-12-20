@@ -1,7 +1,8 @@
 #pragma once
 
 #include "scheduler/Scheduler.hpp"
-
+#include "ai/AIClient.hpp"
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -51,4 +52,9 @@ private:
 
     // Factory tạo scheduler
     std::unique_ptr<Scheduler> make(const std::string& name);
+
+    bool aiEnabled_ = true;
+    std::unique_ptr<AIClient> ai_;
+    std::chrono::steady_clock::time_point lastAiCall_{};
+    std::chrono::milliseconds aiMinInterval_{200};
 };

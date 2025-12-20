@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include "core/Request.hpp"
+#include "core/Response.hpp"
 
 class Socket;
 class Scheduler;
@@ -46,11 +47,12 @@ private:
     int getWeightFromConfig();
 
     // Static files, router và handler
-    bool serveStaticFile(SSL* ssl, int clientFd, const std::string& path);
+    bool serveStaticFile(Response& res, const std::string& path);
     void handleClient(SSL* ssl, int clientSocketFd, const Request& req);
 
-    void handleGET(SSL* ssl, int clientFd, const Request& req);
-    void handlePOST(SSL* ssl, int clientFd, const Request& req);
-    void handlePUT(SSL* ssl, int clientFd, const Request& req);
-    void handleDELETE(SSL* ssl, int clientFd, const Request& req);
+    void handleGET(Response& res, const Request& req);
+    void handlePOST(Response& res, const Request& req);
+    void handlePUT(Response& res, const Request& req);
+    void handleDELETE(Response& res, const Request& req);
+
 };

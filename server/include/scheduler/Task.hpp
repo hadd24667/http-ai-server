@@ -1,18 +1,42 @@
+// Task.hpp
 #pragma once
 #include <functional>
-#include <iostream>
+#include <string>
+#include <cstddef>
 
 struct Task {
-    int id;
-    int estimatedTime;   // SJF
-    int weight;          // WFQ
-    int remainingTime;   // RR
-    std::string algo_at_enqueue;
-    std::function<void()> func;
+    std::size_t id{};
+    int estimatedTime{};
+    int remainingTime{}; 
+    int weight{};
+    std::string algoAtEnqueue;
 
-    Task() : id(0), estimatedTime(1), weight(1), remainingTime(1),algo_at_enqueue("FIFO"), func(nullptr) {}
-    
-    Task(int id, int est, int w, const std::string& alg, std::function<void()> f)
-        : id(id), estimatedTime(est), weight(w),
-          remainingTime(est), algo_at_enqueue(alg), func(f) {}
+    std::string request_method;
+    int request_path_length{};
+    std::size_t req_size{};
+
+    std::function<void()> fn;
+
+    Task() = default;
+
+    Task(
+        std::size_t id_,
+        int est_,
+        int weight_,
+        std::string algo_,
+        std::string method_,
+        int pathLen_,
+        std::size_t reqSize_,
+        std::function<void()> fn_
+    )
+        : id(id_),
+          estimatedTime(est_),
+          remainingTime(est_),
+          weight(weight_),
+          algoAtEnqueue(std::move(algo_)),
+          request_method(std::move(method_)),
+          request_path_length(pathLen_),
+          req_size(reqSize_),
+          fn(std::move(fn_)) {}
 };
+

@@ -30,3 +30,6 @@ target_link_libraries(http_server PRIVATE
 
 # 7. Compile flags
 target_compile_options(http_server PRIVATE -Wall -Wextra -pedantic -O2)
+
+find_package(CURL REQUIRED)
+target_link_libraries(http_server PRIVATE CURL::libcurl)

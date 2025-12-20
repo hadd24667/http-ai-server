@@ -1,6 +1,20 @@
 #include "threadpool/ThreadPool.hpp"
 #include <iostream>
+#include <thread>
 #include <chrono>
+
+static inline long long nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(
+        steady_clock::now().time_since_epoch()
+    ).count();
+}
+
+#define LOGT(msg) \
+    std::cout << "[" << nowMs() << "ms]" \
+              << "[TID " << std::this_thread::get_id() << "] " \
+              << msg << std::endl;
+
 
 ThreadPool::ThreadPool(int threads, Scheduler* scheduler)
     : scheduler(scheduler), stop(false)
@@ -34,28 +48,25 @@ void ThreadPool::workerLoop() {
 
         {
             std::unique_lock<std::mutex> lock(queueMutex);
-
-            // Chờ đến khi có task thật sự trong ThreadPool
             cv.wait(lock, [this]() {
-                return stop.load(std::memory_order_relaxed) ||
-                    !scheduler->empty();
+                bool ready = stop.load(std::memory_order_relaxed) || !scheduler->empty();
+                return ready;
             });
-            if (stop.load(std::memory_order_relaxed))
+            if (stop.load(std::memory_order_relaxed)) {
                 return;
-
-            // lấy task từ scheduler
+            }
             t = scheduler->dequeue();
         }
 
-        // chạy task
-        if (t.func) {
-            t.func();
+        if (t.fn) {
+            t.fn();
+        } else {
+            LOGT("⚠️ Got empty task (fn=null)");
         }
-
-        // giảm task pending
         pendingTasks.fetch_sub(1, std::memory_order_relaxed);
     }
 }
+
 
 
 

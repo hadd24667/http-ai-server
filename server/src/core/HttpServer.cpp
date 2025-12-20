@@ -1,50 +1,69 @@
 #include "core/HttpServer.hpp"
+
+#include <errno.h>
+#include <fcntl.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <ctime>
+#include <iomanip>
+#include <iostream>
+#include <sstream>
+#include <thread>
+
 #include "core/HttpParser.hpp"
 #include "core/Response.hpp"
 #include "core/Socket.hpp"
-#include "threadpool/ThreadPool.hpp"
+#include "monitor/Logger.hpp"
+#include "monitor/SystemMetrics.hpp"
 #include "scheduler/Scheduler.hpp"
 #include "scheduler/SchedulerFactory.hpp"
-#include "monitor/SystemMetrics.hpp"
-#include "monitor/Logger.hpp"
-
-#include <unistd.h>
-#include <sys/socket.h>
-#include <cstring>
-#include <iostream>
-#include <iomanip>
-#include <thread>
-#include <chrono>
-#include <errno.h>
-#include <string.h>
-#include <ctime>
-#include <fcntl.h>
-#include <sstream>
-#include <cerrno>
-#include <netinet/in.h>
-#include <netinet/tcp.h>
-#include <sys/time.h>
+#include "threadpool/ThreadPool.hpp"
 
 // OpenSSL
-#include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/ssl.h>
 
 // =======================
 //  Helpers
 // =======================
+static inline long long nowMs() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
 
+#define LOGX(tag, msg)                                        \
+    std::cout << "[" << nowMs() << "ms]"                      \
+              << "[TID " << std::this_thread::get_id() << "]" \
+              << "[" << tag << "] " << msg << std::endl;
 // Gửi toàn bộ buffer qua SSL
 static void sendAllSSL(SSL* ssl, const char* data, size_t len) {
     size_t total = 0;
 
     while (total < len) {
-        int sent = SSL_write(ssl, data + total, static_cast<int>(len - total));
+        size_t remain = len - total;
+        int sent = SSL_write(ssl, data + total, static_cast<int>(remain));
         if (sent <= 0) {
             int err = SSL_get_error(ssl, sent);
-            std::cout << "[SEND SSL] SSL_write failed, err=" << err << "\n";
+
+            if (err == SSL_ERROR_WANT_WRITE || err == SSL_ERROR_WANT_READ) {
+                // retry nhẹ
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                continue;
+            }
+
+            LOGX("SEND", "❌ SSL_write fatal");
             ERR_print_errors_fp(stderr);
             break;
         }
+
         total += static_cast<size_t>(sent);
     }
 }
@@ -75,8 +94,7 @@ HttpServer::HttpServer(int port, int threadCount, const std::string& algo)
       nextTaskId(0),
       latencyAvg(0.0),
       sslCtx(nullptr),
-      algoName(algo)
-{
+      algoName(algo) {
     serverSocket = std::make_unique<Socket>();
 
     // 1) Tạo scheduler
@@ -128,7 +146,7 @@ std::string HttpServer::readRequestBlockingSSL(SSL* ssl) {
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                continue; // thử lại
+                continue;  // thử lại
             }
             std::cout << "[DEBUG] SSL_read error, err=" << err << "\n";
             ERR_print_errors_fp(stderr);
@@ -162,9 +180,7 @@ int HttpServer::estimateTaskWorkload(const Request& req) {
 }
 
 // Lấy weight cho WFQ – tạm cho tất cả = 1
-int HttpServer::getWeightFromConfig() {
-    return 1;
-}
+int HttpServer::getWeightFromConfig() { return 1; }
 
 void HttpServer::start() {
     std::cout << "[SERVER] Starting on port " << port << "...\n";
@@ -191,6 +207,9 @@ void HttpServer::start() {
     // Vòng accept: mỗi kết nối -> SSL handshake -> đọc request -> Task -> scheduler -> threadpool
     while (isRunning) {
         int clientFd = serverSocket->acceptClient();
+
+        LOGX("NET", "Set SO_SNDTIMEO/SO_RCVTIMEO = 5s");
+
         if (clientFd < 0) {
             if (isRunning) {
                 std::cerr << "[WARN] accept() failed, errno=" << errno << "\n";
@@ -201,6 +220,12 @@ void HttpServer::start() {
         // Tắt Nagle cho client để giảm latency
         int flag = 1;
         setsockopt(clientFd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
+        // timeout send/recv để tránh treo vô hạn
+        timeval tv{};
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+        setsockopt(clientFd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+        setsockopt(clientFd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
         // Tạo SSL object cho client
         SSL* ssl = SSL_new(sslCtx);
@@ -234,76 +259,88 @@ void HttpServer::start() {
         Request req = HttpParser::parse(raw);
         std::cout << "[DEBUG] NEW REQUEST, path = [" << req.path << "]\n";
 
-        int est    = estimateTaskWorkload(req);
+        std::cout << "[TRACE] after-parse: about to estimate workload\n";
+
+        int est = estimateTaskWorkload(req);
         int weight = getWeightFromConfig();
         int currentTaskId = nextTaskId++;
 
+        std::cout << "[TRACE] after-parse: est=" << est << " weight=" << weight
+                  << " taskId=" << currentTaskId << "\n";
+
         auto startTime = std::chrono::steady_clock::now();
 
-        // ===== TẠO TASK =====
-
-        // 1) Tăng pendingTasks TẠI THỜI ĐIỂM ENQUEUE
+        std::cout << "[TRACE] before incrementPendingTasks()\n";
         std::size_t qLenAtEnqueue = threadPool->incrementPendingTasks();
+        std::cout << "[TRACE] after incrementPendingTasks(): qLenAtEnqueue=" << qLenAtEnqueue
+                  << "\n";
 
-        // 2) Lấy thuật toán tại enqueue
+        std::cout << "[TRACE] before scheduler->currentAlgorithm()\n";
         std::string algo_enqueue = scheduler->currentAlgorithm();
+        std::cout << "[TRACE] after scheduler->currentAlgorithm(): " << algo_enqueue << "\n";
 
         // 3) Tạo Task
-        Task task(
-            currentTaskId,
-            est,
-            weight,
-            algo_enqueue,
-            [this, ssl, clientFd, req, startTime, est, algo_enqueue, qLenAtEnqueue]() {
+        std::string method = req.method;
+        int pathLen = static_cast<int>(req.path.size());
 
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        // req_size: ưu tiên body, fallback path
+        std::size_t reqSize = req.body.size();
+        if (reqSize == 0) reqSize = req.path.size();
 
-                auto t0 = startTime;
+        Task task(currentTaskId, est, weight, algo_enqueue,
+                  method,   // request_method
+                  pathLen,  // request_path_length
+                  reqSize,  // req_size
+                  [this, ssl, clientFd, req, startTime, est, algo_enqueue, qLenAtEnqueue]() {
+                      std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
-                // Xử lý request (đã có SSL + FD)
-                handleClient(ssl, clientFd, req);
+                      auto t0 = startTime;
 
-                auto t1 = std::chrono::steady_clock::now();
-                double respMs =
-                    std::chrono::duration<double, std::milli>(t1 - t0).count();
+                      // Xử lý request (đã có SSL + FD)
+                      handleClient(ssl, clientFd, req);
 
-                // EWMA latency
-                this->latencyAvg = this->latencyAvg * 0.9 + respMs * 0.1;
+                      auto t1 = std::chrono::steady_clock::now();
+                      double respMs = std::chrono::duration<double, std::milli>(t1 - t0).count();
 
-                double       cpu      = SystemMetrics::getCpuUsage();
-                std::size_t  reqSize  = req.path.size();
-                std::size_t  queueLen = qLenAtEnqueue;
-                std::string  algo_run = this->scheduler->currentAlgorithm();
+                      // EWMA latency
+                      this->latencyAvg = this->latencyAvg * 0.9 + respMs * 0.1;
 
-                if (this->logger) {
-                    LogEntry e;
-                    e.queue_len            = queueLen;
-                    e.timestamp            = nowIso8601();
-                    e.cpu                  = cpu;
-                    e.request_method       = req.method;
-                    e.request_path_length  = req.path.size();
-                    e.estimated_workload   = est;
-                    e.algo_at_enqueue      = algo_enqueue;
-                    e.algo_at_run          = algo_run;
-                    e.req_size             = reqSize;
-                    e.response_time_ms     = respMs;
-                    e.prev_latency_avg     = this->latencyAvg;
+                      double cpu = SystemMetrics::getCpuUsage();
+                      std::size_t reqSize = req.path.size();
+                      std::size_t queueLen = qLenAtEnqueue;
+                      std::string algo_run = this->scheduler->currentAlgorithm();
 
-                    this->logger->log(e);
-                }
+                      if (this->logger) {
+                          LogEntry e;
+                          e.queue_len = queueLen;
+                          e.timestamp = nowIso8601();
+                          e.cpu = cpu;
+                          e.request_method = req.method;
+                          e.request_path_length = req.path.size();
+                          e.estimated_workload = est;
+                          e.algo_at_enqueue = algo_enqueue;
+                          e.algo_at_run = algo_run;
+                          e.req_size = reqSize;
+                          e.response_time_ms = respMs;
+                          e.prev_latency_avg = this->latencyAvg;
 
-                std::cout << "[LOG] cpu=" << cpu
-                          << " q=" << queueLen
-                          << " algo_enqueue=" << algo_enqueue
-                          << " algo_run=" << algo_run
-                          << " rt=" << respMs << "ms"
-                          << " latAvg=" << this->latencyAvg << "ms\n";
-            }
-        );
+                          this->logger->log(e);
+                      }
+
+                      std::cout << "[LOG] cpu=" << cpu << " q=" << queueLen
+                                << " algo_enqueue=" << algo_enqueue << " algo_run=" << algo_run
+                                << " rt=" << respMs << "ms"
+                                << " latAvg=" << this->latencyAvg << "ms\n";
+                  });
 
         // enqueue
+        std::cout << "[TRACE] before scheduler->enqueue(task)\n";
         scheduler->enqueue(task, qLenAtEnqueue);
+        std::cout << "[TRACE] after scheduler->enqueue(task)\n";
+
+        std::cout << "[TRACE] before threadPool->notifyWorker()\n";
         threadPool->notifyWorker();
+        std::cout << "[TRACE] after threadPool->notifyWorker()\n";
     }
 }
 
@@ -316,7 +353,7 @@ void HttpServer::stop() {
 // =======================
 // Static file handler
 // =======================
-bool HttpServer::serveStaticFile(SSL* ssl, int clientFd, const std::string& path) {
+bool HttpServer::serveStaticFile(Response& res, const std::string& path) {
     std::string fullPath = "www" + path;
     if (path == "/") fullPath = "www/index.html";
 
@@ -325,165 +362,60 @@ bool HttpServer::serveStaticFile(SSL* ssl, int clientFd, const std::string& path
 
     std::ostringstream ss;
     ss << f.rdbuf();
-    std::string body = ss.str();
+    res.body = ss.str();
 
-    Response res;
     res.statusCode = 200;
     res.statusText = "OK";
 
-    // MIME types (dùng fullPath, không dùng path)
-    if (endsWith(fullPath, ".html")) res.headers["Content-Type"] = "text/html";
-    else if (endsWith(fullPath, ".css")) res.headers["Content-Type"] = "text/css";
-    else if (endsWith(fullPath, ".js")) res.headers["Content-Type"] = "application/javascript";
-    else if (endsWith(fullPath, ".png")) res.headers["Content-Type"] = "image/png";
-    else if (endsWith(fullPath, ".jpg") || endsWith(fullPath, ".jpeg")) res.headers["Content-Type"] = "image/jpeg";
-    else res.headers["Content-Type"] = "application/octet-stream";
-
-    res.headers["Connection"] = "close";
-    res.body = body;
-
-    std::string raw = res.build();
-    sendAllSSL(ssl, raw.c_str(), raw.size());
+    // MIME types
+    if (endsWith(fullPath, ".html"))
+        res.headers["Content-Type"] = "text/html";
+    else if (endsWith(fullPath, ".css"))
+        res.headers["Content-Type"] = "text/css";
+    else if (endsWith(fullPath, ".js"))
+        res.headers["Content-Type"] = "application/javascript";
+    else if (endsWith(fullPath, ".png"))
+        res.headers["Content-Type"] = "image/png";
+    else if (endsWith(fullPath, ".jpg") || endsWith(fullPath, ".jpeg"))
+        res.headers["Content-Type"] = "image/jpeg";
+    else
+        res.headers["Content-Type"] = "application/octet-stream";
 
     return true;
 }
 
-
-
-// =======================
-// handleClient
-// =======================
-void HttpServer::handleClient(SSL* ssl, int clientSocketFd, const Request& req) {
-
-    std::cout << "[DEBUG] handleClient START, path=[" << req.path << "]\n";
-
-    // 1) favicon
-    if (req.path == "/favicon.ico") {
-        Response res;
-        res.statusCode = 404;
-        res.statusText = "Not Found";
-        res.headers["Content-Type"] = "text/plain";
-        res.headers["Connection"] = "close";
-        res.body = "";
-
-        std::string raw = res.build();
-        sendAllSSL(ssl, raw.c_str(), raw.size());
-        // không return, xuống cuối hàm sẽ đóng SSL
-    } else {
-        bool handled = false;
-
-        // 2) Static file – ưu tiên cho GET
-        if (req.method == "GET") {
-            if (serveStaticFile(ssl, clientSocketFd, req.path)) {
-                handled = true;   // đã xử lý xong response
-            }
-        }
-
-        // 3) Nếu chưa xử lý static file thì chạy workload + router
-        if (!handled) {
-            // SMART WORKLOAD ENGINE
-            static double loadFactor = 20000.0;
-            int w = std::max(1, (int)req.path.size());
-            volatile long dummy = 0;
-            long iterations = (long)(w * loadFactor);
-
-            auto t0 = std::chrono::steady_clock::now();
-            for (long i = 0; i < iterations; ++i) dummy += i;
-            auto t1 = std::chrono::steady_clock::now();
-
-            double busySec = std::chrono::duration<double>(t1 - t0).count();
-            SystemMetrics::addBusy(busySec);
-
-            double cpu = SystemMetrics::getCpuUsage();
-            if (cpu < 30.0) loadFactor *= 1.10;
-            else if (cpu > 85.0) loadFactor *= 0.85;
-
-            if (loadFactor < 5000.0)   loadFactor = 5000.0;
-            if (loadFactor > 200000.0) loadFactor = 200000.0;
-
-            // 4) METHOD ROUTER
-            if (req.method == "GET") {
-                handleGET(ssl, clientSocketFd, req);
-            } else if (req.method == "POST") {
-                handlePOST(ssl, clientSocketFd, req);
-            } else if (req.method == "PUT") {
-                handlePUT(ssl, clientSocketFd, req);
-            } else if (req.method == "DELETE") {
-                handleDELETE(ssl, clientSocketFd, req);
-            } else {
-                Response res;
-                res.statusCode = 405;
-                res.statusText = "Method Not Allowed";
-                res.headers["Content-Type"] = "text/plain";
-                res.headers["Connection"] = "close";
-                res.body = "Unsupported method";
-
-                std::string raw = res.build();
-                sendAllSSL(ssl, raw.c_str(), raw.size());
-            }
-        }
-    }
-
-    // 5) Chỉ đóng kết nối 1 lần ở đây
-    SSL_shutdown(ssl);
-    SSL_free(ssl);
-    close(clientSocketFd);
-}
-
-
 // =======================
 // 4 handler method
 // =======================
-void HttpServer::handleGET(SSL* ssl, int clientFd, const Request& req) {
-    Response res;
+void HttpServer::handleGET(Response& res, const Request& req) {
     res.statusCode = 200;
     res.statusText = "OK";
-    res.headers["Content-Type"] = "text/plain";
-    res.headers["Connection"] = "close";
     res.body = "GET " + req.path;
-
-    std::string raw = res.build();
-    sendAllSSL(ssl, raw.c_str(), raw.size());
 }
 
-void HttpServer::handlePOST(SSL* ssl, int clientFd, const Request& req) {
-    Response res;
+void HttpServer::handlePOST(Response& res, const Request& req) {
     res.statusCode = 200;
     res.statusText = "OK";
     res.headers["Content-Type"] = "application/json";
-    res.headers["Connection"] = "close";
-
     res.body = "{ \"received\": \"" + req.body + "\" }";
-
-    std::string raw = res.build();
-    sendAllSSL(ssl, raw.c_str(), raw.size());
 }
 
-void HttpServer::handlePUT(SSL* ssl, int clientFd, const Request& req) {
+void HttpServer::handlePUT(Response& res, const Request& req) {
     std::string path = "www" + req.path;
 
     std::ofstream f(path, std::ios::binary);
     f << req.body;
     f.close();
 
-    Response res;
     res.statusCode = 201;
     res.statusText = "Created";
-    res.headers["Content-Type"] = "text/plain";
-    res.headers["Connection"] = "close";
     res.body = "File saved to " + req.path;
-
-    std::string raw = res.build();
-    sendAllSSL(ssl, raw.c_str(), raw.size());
 }
 
-void HttpServer::handleDELETE(SSL* ssl, int clientFd, const Request& req) {
+void HttpServer::handleDELETE(Response& res, const Request& req) {
     std::string path = "www" + req.path;
 
     int status = std::remove(path.c_str());
-
-    Response res;
-    res.headers["Connection"] = "close";
 
     if (status == 0) {
         res.statusCode = 200;
@@ -494,7 +426,77 @@ void HttpServer::handleDELETE(SSL* ssl, int clientFd, const Request& req) {
         res.statusText = "Not Found";
         res.body = "File not found: " + req.path;
     }
+}
+// =======================
+// handleClient
+// =======================
+void HttpServer::handleClient(SSL* ssl, int clientSocketFd, const Request& req) {
+    std::cout << "[DEBUG] handleClient START, path=[" << req.path << "]\n";
 
+    Response res;
+    res.headers["Content-Type"] = "text/plain";
+    res.headers["Connection"] = "close";
+
+    bool handled = false;
+
+    // 1) favicon
+    if (req.path == "/favicon.ico") {
+        res.statusCode = 404;
+        res.statusText = "Not Found";
+        res.body = "";
+        handled = true;
+    }
+
+    // 2) Static file (GET only)
+    if (!handled && req.method == "GET") {
+        if (serveStaticFile(res, req.path)) {
+            handled = true;
+        }
+    }
+
+    // 3) Workload + router
+    if (!handled) {
+        // ===== SMART WORKLOAD ENGINE =====
+        static double loadFactor = 20000.0;
+        int w = std::max(1, (int)req.path.size());
+        volatile long dummy = 0;
+        long iterations = (long)(w * loadFactor);
+
+        auto t0 = std::chrono::steady_clock::now();
+        for (long i = 0; i < iterations; ++i) dummy += i;
+        auto t1 = std::chrono::steady_clock::now();
+
+        double busySec = std::chrono::duration<double>(t1 - t0).count();
+        SystemMetrics::addBusy(busySec);
+
+        double cpu = SystemMetrics::getCpuUsage();
+        if (cpu < 30.0)
+            loadFactor *= 1.10;
+        else if (cpu > 85.0)
+            loadFactor *= 0.85;
+
+        loadFactor = std::clamp(loadFactor, 5000.0, 200000.0);
+
+        // ===== ROUTER =====
+        if (req.method == "GET") {
+            handleGET(res, req);
+        } else if (req.method == "POST") {
+            handlePOST(res, req);
+        } else if (req.method == "PUT") {
+            handlePUT(res, req);
+        } else if (req.method == "DELETE") {
+            handleDELETE(res, req);
+        } else {
+            res.statusCode = 405;
+            res.statusText = "Method Not Allowed";
+            res.body = "Unsupported method";
+        }
+    }
+
+    // 4) ALWAYS send response here (1 lần duy nhất)
     std::string raw = res.build();
     sendAllSSL(ssl, raw.c_str(), raw.size());
+    int sd = SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(clientSocketFd);
 }
