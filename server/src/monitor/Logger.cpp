@@ -37,9 +37,10 @@ void Logger::log(const LogEntry& e) {
      << e.response_time_ms << ","
      << e.prev_latency_avg << "\n";
 
-    counter++;
-    if (counter % 50 == 0)
-        file.flush();
+    // counter++;
+    // if (counter % 50 == 0)
+    //     file.flush();
+    file.flush();
 }
 
 void Logger::flush() {

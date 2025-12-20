@@ -256,6 +256,8 @@ void HttpServer::start() {
             algo_enqueue,
             [this, ssl, clientFd, req, startTime, est, algo_enqueue, qLenAtEnqueue]() {
 
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
                 auto t0 = startTime;
 
                 // Xử lý request (đã có SSL + FD)
@@ -275,9 +277,9 @@ void HttpServer::start() {
 
                 if (this->logger) {
                     LogEntry e;
+                    e.queue_len            = queueLen;
                     e.timestamp            = nowIso8601();
                     e.cpu                  = cpu;
-                    e.queue_len            = queueLen;
                     e.request_method       = req.method;
                     e.request_path_length  = req.path.size();
                     e.estimated_workload   = est;

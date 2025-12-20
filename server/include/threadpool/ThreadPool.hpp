@@ -1,3 +1,4 @@
+// ThreadPool.hpp
 #pragma once
 
 #include <vector>
@@ -26,30 +27,32 @@ public:
     }
 
     std::size_t getPendingTaskCount() const {
-        // ThreadPool không còn queue – trả 0 hoặc sau này dùng pendingTasks từ HttpServer
-        return 0;
+        return pendingTasks.load(std::memory_order_relaxed);
     }
 
     // Tăng/giảm pending task – dùng cho HttpServer
     std::size_t incrementPendingTasks() {
-        return pendingTasks.fetch_add(1, std::memory_order_relaxed) + 1;
+        return pendingTasks.fetch_add(1, std::memory_order_relaxed);
     }
 
     void decrementPendingTasks() {
         pendingTasks.fetch_sub(1, std::memory_order_relaxed);
     }
 
-     void notifyWorker() {
+    void notifyWorker() {
         cv.notify_one();
     }
 
 private:
     void workerLoop();
 
-    Scheduler* scheduler;              // không sở hữu, HttpServer giữ lifetime
+    Scheduler* scheduler;
     std::vector<std::thread> workers;
     std::atomic<bool> stop{false};
+
+    // Đếm task đang "trong hệ thống" (đang chờ + đang chạy)
     std::atomic<std::size_t> pendingTasks{0};
+
     std::condition_variable cv;
     std::mutex queueMutex;
 };

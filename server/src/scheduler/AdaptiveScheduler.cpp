@@ -37,9 +37,6 @@ std::string AdaptiveScheduler::currentAlgorithm() const {
 
 // ================================
 //  Helper: Tính độ biến thiên workload
-//  Mục đích: 
-//    - workload ít biến thiên → SJF tốt
-//    - workload biến thiên mạnh → RR/WFQ tốt
 // ================================
 double AdaptiveScheduler::workloadVariability() {
     std::lock_guard<std::mutex> lock(wloadMtx_);
@@ -66,32 +63,22 @@ std::string AdaptiveScheduler::decideAlgorithm(double cpu,
                                                std::size_t qlen,
                                                double wvar)
 {
-    // ---------------------------
     // 1) Load rất nhỏ → FIFO
-    // ---------------------------
     if (qlen < 20 && cpu < 40.0) {
         return "FIFO";
     }
 
-    // ---------------------------
-    // 2) Workload ít biến thiên
-    //    + CPU chưa quá cao → SJF
-    // ---------------------------
+    // 2) Workload ít biến thiên + CPU chưa quá cao → SJF
     if (wvar < 200.0 && cpu < 70.0) {
         return "SJF";
     }
 
-    // ---------------------------
-    // 3) CPU cao → RR
-    //    (nhưng queue chưa phình)
-    // ---------------------------
+    // 3) CPU cao → RR (queue chưa phình to)
     if (cpu >= 70.0 && cpu < 85.0 && qlen < 200) {
         return "RR";
     }
 
-    // ---------------------------
     // 4) CPU rất cao + queue phình lớn → WFQ
-    // ---------------------------
     if (cpu >= 85.0 || qlen >= 200) {
         return "WFQ";
     }
@@ -139,6 +126,7 @@ void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
 
     std::lock_guard<std::mutex> lock(mtx_);
 
+    // đổi inner scheduler nếu cần
     if (target != algoName_) {
         inner_    = make(target);
         algoName_ = target;
