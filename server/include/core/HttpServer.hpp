@@ -44,7 +44,6 @@ private:
 
     // Ước lượng workload cho scheduler
     int estimateTaskWorkload(const Request& req);
-    int getWeightFromConfig();
 
     // Static files, router và handler
     bool serveStaticFile(Response& res, const std::string& path);

@@ -7,6 +7,7 @@
 
 #include <numeric>
 #include <algorithm>
+#include <iostream>
 
 // ================================
 //  THAM SỐ ADAPTIVE MỚI
@@ -125,6 +126,14 @@ static int computeQueueBin(std::size_t q) {
 void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
     double cpu = SystemMetrics::getCpuUsage();
 
+     {
+        std::lock_guard<std::mutex> lock(wloadMtx_);
+        recentWorkloads_.push_back((double)t.estimatedTime);
+        if (recentWorkloads_.size() > WORKLOAD_WINDOW) {
+            recentWorkloads_.erase(recentWorkloads_.begin());
+        }
+    }
+
     // lấy variance
     double wvar = workloadVariability();
 
@@ -146,6 +155,12 @@ void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
             f.estimated_workload = static_cast<double>(t.estimatedTime);
             f.req_size = t.req_size;
 
+            std::cout << "[AI] calling predict | cpu=" << cpu
+            << " q=" << queueLen
+            << " wvar=" << wvar
+            << " current=" << algoName_
+            << std::endl;
+
             auto pred = ai_->predict(f);
             if (pred && !pred->empty()) {
                 target = *pred;  // "SJF", "RR", "WFQ", ...
@@ -153,33 +168,39 @@ void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
         }
     }
 
-        // fallback nếu AI fail
+    // fallback nếu AI fail
     if (target.empty()) {
         target = decideAlgorithm(cpu, queueLen, wvar);
     }
 
-    // ================================
-    //  (FIX) THỰC SỰ ENQUEUE TASK
-    // ================================
     {
         std::lock_guard<std::mutex> lock(mtx_);
 
-        // Không switch khi còn task, tránh "rơi task" trong inner cũ
-        if (inner_ && !inner_->empty()) {
-            // giữ nguyên algoName_ nếu đang có task chờ
-        } else {
-            if (!target.empty() && target != algoName_) {
-                inner_ = make(target);
-                algoName_ = target;
+        // nếu cần switch -> chuyển hết task sang scheduler mới
+        if (!target.empty() && target != algoName_) {
+            std::vector<Task> buf;
+            // drain toàn bộ task đang nằm trong inner_
+            while (inner_ && !inner_->empty()) {
+                buf.push_back(inner_->dequeue());
             }
+
+            inner_ = make(target);
+            algoName_ = target;
+
+            // đẩy lại task vào scheduler mới
+            for (auto &x : buf) inner_->enqueue(x);
         }
+
 
         if (!inner_) {
             inner_ = std::make_unique<FIFOScheduler>();
             algoName_ = "FIFO";
         }
+        std::cout << "[SCHED] q=" << queueLen << " cpu=" << cpu
+          << " target=" << target
+          << " current=" << algoName_ << "\n";
 
-        inner_->enqueue(t);  // 🔥 DÒNG QUAN TRỌNG NHẤT
+        inner_->enqueue(t);  
     }
 
 }
@@ -189,14 +210,11 @@ void AdaptiveScheduler::enqueue(const Task& t, std::size_t queueLen) {
 //  dequeue
 // ================================
 Task AdaptiveScheduler::dequeue() {
-    Scheduler* ptr = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(mtx_);
-        ptr = inner_.get();
-    }
-    if (!ptr) return Task{};
-    return ptr->dequeue();
+    std::lock_guard<std::mutex> lock(mtx_);
+    if (!inner_) return Task{};
+    return inner_->dequeue();
 }
+
 
 
 // ================================

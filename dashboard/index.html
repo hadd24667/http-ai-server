@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>HTTP-AI Server Dashboard (Realtime)</title>
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">⚡</div>
+      <div>
+        <div class="title">HTTP-AI Server Dashboard</div>
+        <div class="subtitle">Realtime từ log CSV qua WebSocket</div>
+      </div>
+    </div>
+    <div class="status">
+      <span id="wsState" class="pill gray">WS: disconnected</span>
+      <span id="lastSeen" class="pill">Last: -</span>
+      <span id="algoNow" class="pill">Algo: -</span>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Màn 1 -->
+    <section class="grid3">
+      <div class="card">
+        <div class="card-h">CPU</div>
+        <div class="card-v" id="cpuVal">-</div>
+        <div class="card-f">SystemMetrics</div>
+      </div>
+      <div class="card">
+        <div class="card-h">Queue length</div>
+        <div class="card-v" id="qVal">-</div>
+        <div class="card-f">pending tasks</div>
+      </div>
+      <div class="card">
+        <div class="card-h">Current scheduler</div>
+        <div class="card-v" id="schedVal">-</div>
+        <div class="card-f">algo_at_run</div>
+      </div>
+    </section>
+
+    <!-- Màn 2 -->
+    <section class="card big">
+      <div class="section-title">🔄 Scheduler Timeline</div>
+      <div class="section-sub">Timeline: thời gian → thuật toán. Dấu chấm = lúc switch.</div>
+      <canvas id="timelineChart"></canvas>
+    </section>
+
+    <!-- Màn 3 -->
+    <section class="card big">
+      <div class="section-title">🤖 AI Decision</div>
+      <div class="section-sub">Feature input + predicted algorithm + fallback (nếu có trong log).</div>
+
+      <div class="grid3 mt">
+        <div class="panel">
+          <div class="panel-h">Feature snapshot</div>
+          <div class="kv"><span>cpu</span><b id="ai_cpu">-</b></div>
+          <div class="kv"><span>queue_len</span><b id="ai_q">-</b></div>
+          <div class="kv"><span>estimated_workload</span><b id="ai_est">-</b></div>
+          <div class="kv"><span>req_size</span><b id="ai_size">-</b></div>
+          <div class="kv"><span>method</span><b id="ai_method">-</b></div>
+          <div class="kv"><span>path_len</span><b id="ai_pathlen">-</b></div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">Prediction</div>
+          <div class="kv"><span>predicted</span><b id="ai_pred">-</b></div>
+          <div class="kv"><span>fallback</span><b id="ai_fallback">-</b></div>
+          <div class="hint">
+            Nếu log chưa có <code>ai_predicted</code>/<code>ai_fallback</code>, panel này sẽ hiện “chưa log”.
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="panel-h">Runtime</div>
+          <div class="kv"><span>algo_at_run</span><b id="ai_run">-</b></div>
+          <div class="kv"><span>algo_at_enqueue</span><b id="ai_enq">-</b></div>
+          <div class="kv"><span>latency(ms)</span><b id="ai_rt">-</b></div>
+          <div class="kv"><span>latAvg(ms)</span><b id="ai_latavg">-</b></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Màn 4 -->
+    <section class="grid2">
+      <div class="card big">
+        <div class="section-title">📈 Avg latency by algorithm</div>
+        <div class="section-sub">Tính từ response_time_ms theo algo_at_run.</div>
+        <canvas id="latencyChart"></canvas>
+      </div>
+
+      <div class="card big">
+        <div class="section-title">📈 Throughput by algorithm</div>
+        <div class="section-sub">Ước lượng req/s theo cửa sổ thời gian.</div>
+        <canvas id="throughputChart"></canvas>
+      </div>
+    </section>
+
+    <footer class="foot">
+      Tip: mở bằng <code>python3 -m http.server</code> để tránh CORS lặt vặt.
+    </footer>
+  </main>
+
+  <script src="./app.js"></script>
+</body>
+</html>

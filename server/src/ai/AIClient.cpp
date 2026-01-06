@@ -1,5 +1,6 @@
 #include "ai/AIClient.hpp"
 #include <curl/curl.h>
+#include <iostream>
 #include <nlohmann/json.hpp>
 
 using json = nlohmann::json;
@@ -13,6 +14,7 @@ static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* use
 AIClient::AIClient(std::string url, long timeoutMs)
     : url_(std::move(url)), timeoutMs_(timeoutMs) {}
 
+
 std::optional<std::string> AIClient::predict(const AIFeatures& f) const {
     CURL* curl = curl_easy_init();
     if (!curl) return std::nullopt;
@@ -20,6 +22,7 @@ std::optional<std::string> AIClient::predict(const AIFeatures& f) const {
     std::string response;
     struct curl_slist* headers = nullptr;
     headers = curl_slist_append(headers, "Content-Type: application/json");
+    headers = curl_slist_append(headers, "Host: 127.0.0.1");
 
     json payload = {
         {"cpu", f.cpu},
@@ -32,6 +35,7 @@ std::optional<std::string> AIClient::predict(const AIFeatures& f) const {
     };
 
     std::string body = payload.dump();
+    std::cout << "[AI-CLIENT] POST " << url_ << " body=" << body << std::endl;
 
     curl_easy_setopt(curl, CURLOPT_URL, url_.c_str());
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
@@ -49,13 +53,27 @@ std::optional<std::string> AIClient::predict(const AIFeatures& f) const {
     curl_slist_free_all(headers);
     curl_easy_cleanup(curl);
 
-    if (res != CURLE_OK || httpCode < 200 || httpCode >= 300) return std::nullopt;
+    if (res != CURLE_OK || httpCode < 200 || httpCode >= 300) {
+        std::cerr << "[AI-CLIENT] request failed "
+                  << "curl=" << curl_easy_strerror(res)
+                  << " http=" << httpCode << std::endl;
+        return std::nullopt;
+    }
 
     try {
         auto j = json::parse(response);
-        if (!j.contains("algorithm")) return std::nullopt;
-        return j["algorithm"].get<std::string>();
-    } catch (...) {
+        if (!j.contains("algorithm")) {
+            std::cerr << "[AI-CLIENT] invalid response: " << response << std::endl;
+            return std::nullopt;
+        }
+
+        auto algo = j["algorithm"].get<std::string>();
+        std::cout << "[AI-CLIENT] response = " << algo << std::endl;
+        return algo;
+
+    } catch (const std::exception& e) {
+        std::cerr << "[AI-CLIENT] json parse error: " << e.what()
+                  << " body=" << response << std::endl;
         return std::nullopt;
     }
 }

@@ -13,6 +13,8 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -34,15 +36,15 @@
 // =======================
 //  Helpers
 // =======================
-static inline long long nowMs() {
-    using namespace std::chrono;
-    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
-}
+// static inline long long nowMs() {
+//     using namespace std::chrono;
+//     return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+// }
 
-#define LOGX(tag, msg)                                        \
-    std::cout << "[" << nowMs() << "ms]"                      \
-              << "[TID " << std::this_thread::get_id() << "]" \
-              << "[" << tag << "] " << msg << std::endl;
+// #define LOGX(tag, msg)                                        \
+//     std::cout << "[" << nowMs() << "ms]"                      \
+//               << "[TID " << std::this_thread::get_id() << "]" \
+//               << "[" << tag << "] " << msg << std::endl;
 // Gửi toàn bộ buffer qua SSL
 static void sendAllSSL(SSL* ssl, const char* data, size_t len) {
     size_t total = 0;
@@ -58,8 +60,6 @@ static void sendAllSSL(SSL* ssl, const char* data, size_t len) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
                 continue;
             }
-
-            LOGX("SEND", "❌ SSL_write fatal");
             ERR_print_errors_fp(stderr);
             break;
         }
@@ -134,53 +134,75 @@ HttpServer::~HttpServer() {
     }
 }
 
-// Đọc raw HTTP request qua SSL: đến khi có "\r\n\r\n" hoặc quá lớn / lỗi
+static long long parseContentLength(const std::string& headers) {
+    // đơn giản, đủ dùng với wrk (không chunked)
+    std::string key = "Content-Length:";
+    auto pos = headers.find(key);
+    if (pos == std::string::npos) return 0;
+
+    pos += key.size();
+    while (pos < headers.size() && (headers[pos] == ' ' || headers[pos] == '\t')) pos++;
+
+    long long val = 0;
+    while (pos < headers.size() && isdigit((unsigned char)headers[pos])) {
+        val = val * 10 + (headers[pos] - '0');
+        pos++;
+    }
+    return val;
+}
+
 std::string HttpServer::readRequestBlockingSSL(SSL* ssl) {
     std::string data;
     char buffer[4096];
-    int total = 0;
 
-    while (true) {
+    // 1) đọc đến khi đủ header
+    while (data.find("\r\n\r\n") == std::string::npos) {
         int n = SSL_read(ssl, buffer, sizeof(buffer));
-
         if (n <= 0) {
             int err = SSL_get_error(ssl, n);
-            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) {
-                continue;  // thử lại
-            }
-            std::cout << "[DEBUG] SSL_read error, err=" << err << "\n";
-            ERR_print_errors_fp(stderr);
-            break;
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
+            return "";
         }
-
         data.append(buffer, n);
-        total += n;
-
-        // Đã nhận đủ header HTTP
-        if (data.find("\r\n\r\n") != std::string::npos) {
-            break;
-        }
-
-        // Guard: không cho request header quá lớn
-        if (total > 65536) {
-            std::cout << "[DEBUG] request too large, total=" << total << "\n";
-            break;
-        }
+        if (data.size() > 65536) return "";  // guard header quá lớn
     }
 
-    std::cout << "[DEBUG] SSL recv total bytes = " << total << "\n";
+    // 2) xác định Content-Length
+    size_t headerEnd = data.find("\r\n\r\n");
+    size_t bodyStart = headerEnd + 4;
+    long long contentLen = parseContentLength(data.substr(0, bodyStart));
+
+    // guard body
+    if (contentLen < 0 || contentLen > 5 * 1024 * 1024) return "";  // ví dụ cap 5MB
+
+    // 3) đọc tiếp đến khi đủ body
+    while (data.size() < bodyStart + (size_t)contentLen) {
+        int n = SSL_read(ssl, buffer, sizeof(buffer));
+        if (n <= 0) {
+            int err = SSL_get_error(ssl, n);
+            if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE) continue;
+            return "";
+        }
+        data.append(buffer, n);
+    }
+
     return data;
 }
 
 // Ước lượng workload để test SJF / RR / WFQ
 int HttpServer::estimateTaskWorkload(const Request& req) {
     int w = static_cast<int>(req.path.size());
-    if (w <= 0) w = 1;
+
+    // Ưu tiên body nếu có
+    if (!req.body.empty()) {
+        w += static_cast<int>(req.body.size());
+    }
+
+    // scale
+    w = w / 10 + 1;
+
     return w;
 }
-
-// Lấy weight cho WFQ – tạm cho tất cả = 1
-int HttpServer::getWeightFromConfig() { return 1; }
 
 void HttpServer::start() {
     std::cout << "[SERVER] Starting on port " << port << "...\n";
@@ -208,7 +230,7 @@ void HttpServer::start() {
     while (isRunning) {
         int clientFd = serverSocket->acceptClient();
 
-        LOGX("NET", "Set SO_SNDTIMEO/SO_RCVTIMEO = 5s");
+        // LOGX("NET", "Set SO_SNDTIMEO/SO_RCVTIMEO = 5s");
 
         if (clientFd < 0) {
             if (isRunning) {
@@ -257,27 +279,12 @@ void HttpServer::start() {
 
         // Parse request
         Request req = HttpParser::parse(raw);
-        std::cout << "[DEBUG] NEW REQUEST, path = [" << req.path << "]\n";
-
-        std::cout << "[TRACE] after-parse: about to estimate workload\n";
 
         int est = estimateTaskWorkload(req);
-        int weight = getWeightFromConfig();
         int currentTaskId = nextTaskId++;
-
-        std::cout << "[TRACE] after-parse: est=" << est << " weight=" << weight
-                  << " taskId=" << currentTaskId << "\n";
-
         auto startTime = std::chrono::steady_clock::now();
-
-        std::cout << "[TRACE] before incrementPendingTasks()\n";
         std::size_t qLenAtEnqueue = threadPool->incrementPendingTasks();
-        std::cout << "[TRACE] after incrementPendingTasks(): qLenAtEnqueue=" << qLenAtEnqueue
-                  << "\n";
-
-        std::cout << "[TRACE] before scheduler->currentAlgorithm()\n";
         std::string algo_enqueue = scheduler->currentAlgorithm();
-        std::cout << "[TRACE] after scheduler->currentAlgorithm(): " << algo_enqueue << "\n";
 
         // 3) Tạo Task
         std::string method = req.method;
@@ -286,6 +293,28 @@ void HttpServer::start() {
         // req_size: ưu tiên body, fallback path
         std::size_t reqSize = req.body.size();
         if (reqSize == 0) reqSize = req.path.size();
+
+        // ================================
+        // Assign weight for WFQ
+        // ================================
+        int weight;
+
+        // 1. Base weight theo độ nặng request
+        if (est <= 50) {
+            weight = 3;  // request nhẹ
+        } else if (est <= 200) {
+            weight = 2;  // trung bình
+        } else {
+            weight = 1;  // request nặng
+        }
+
+        // 2. Ưu tiên thêm cho GET (thường nhẹ, phổ biến)
+        if (method == "GET") {
+            weight += 1;
+        }
+
+        // 3. Giới hạn weight để tránh quá ưu tiên
+        weight = std::min(weight, 5);
 
         Task task(currentTaskId, est, weight, algo_enqueue,
                   method,   // request_method
@@ -334,13 +363,8 @@ void HttpServer::start() {
                   });
 
         // enqueue
-        std::cout << "[TRACE] before scheduler->enqueue(task)\n";
         scheduler->enqueue(task, qLenAtEnqueue);
-        std::cout << "[TRACE] after scheduler->enqueue(task)\n";
-
-        std::cout << "[TRACE] before threadPool->notifyWorker()\n";
         threadPool->notifyWorker();
-        std::cout << "[TRACE] after threadPool->notifyWorker()\n";
     }
 }
 
@@ -387,13 +411,85 @@ bool HttpServer::serveStaticFile(Response& res, const std::string& path) {
 // =======================
 // 4 handler method
 // =======================
+static std::string mapToFilePath(const std::string& httpPath) {
+    const std::string prefix = "/api/file/";
+
+    if (httpPath.rfind(prefix, 0) != 0) {
+        return "";
+    }
+
+    std::string name = httpPath.substr(prefix.size());
+
+    // Chặn ../ để tránh ghi lung tung
+    if (name.find("..") != std::string::npos || name.find('\\') != std::string::npos) {
+        return "";
+    }
+
+    return "www/files/" + name;
+}
+
 void HttpServer::handleGET(Response& res, const Request& req) {
+    std::string filePath = mapToFilePath(req.path);
+
+    // Nếu là file API -> đọc file thật
+    if (!filePath.empty()) {
+        if (!std::filesystem::exists(filePath)) {
+            res.statusCode = 404;
+            res.statusText = "Not Found";
+            res.body = "File not found: " + req.path;
+            return;
+        }
+
+        std::ifstream f(filePath, std::ios::binary);
+        if (!f) {
+            res.statusCode = 500;
+            res.statusText = "Internal Server Error";
+            res.body = "Cannot open file";
+            return;
+        }
+
+        std::ostringstream ss;
+        ss << f.rdbuf();
+        f.close();
+
+        res.statusCode = 200;
+        res.statusText = "OK";
+        res.headers["Content-Type"] = "text/plain";
+        res.body = ss.str();
+        return;
+    }
+
+    // Fallback: hành vi cũ
     res.statusCode = 200;
     res.statusText = "OK";
     res.body = "GET " + req.path;
 }
 
 void HttpServer::handlePOST(Response& res, const Request& req) {
+    std::string filePath = mapToFilePath(req.path);
+
+    // Nếu là file API -> tạo file thật
+    if (!filePath.empty()) {
+        std::filesystem::create_directories(std::filesystem::path(filePath).parent_path());
+
+        std::ofstream f(filePath, std::ios::binary);
+        if (!f) {
+            res.statusCode = 500;
+            res.statusText = "Internal Server Error";
+            res.body = "Cannot write file";
+            return;
+        }
+
+        f << req.body;
+        f.close();
+
+        res.statusCode = 201;
+        res.statusText = "Created";
+        res.body = "File created: " + req.path;
+        return;
+    }
+
+    // Fallback: hành vi cũ (API khác)
     res.statusCode = 200;
     res.statusText = "OK";
     res.headers["Content-Type"] = "application/json";
@@ -401,9 +497,26 @@ void HttpServer::handlePOST(Response& res, const Request& req) {
 }
 
 void HttpServer::handlePUT(Response& res, const Request& req) {
-    std::string path = "www" + req.path;
+    std::string path = mapToFilePath(req.path);
+
+    if (path.empty()) {
+        res.statusCode = 400;
+        res.statusText = "Bad Request";
+        res.body = "Invalid file path";
+        return;
+    }
+
+    // Tạo thư mục nếu chưa tồn tại
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
 
     std::ofstream f(path, std::ios::binary);
+    if (!f) {
+        res.statusCode = 500;
+        res.statusText = "Internal Server Error";
+        res.body = "Cannot write file";
+        return;
+    }
+
     f << req.body;
     f.close();
 
@@ -413,11 +526,17 @@ void HttpServer::handlePUT(Response& res, const Request& req) {
 }
 
 void HttpServer::handleDELETE(Response& res, const Request& req) {
-    std::string path = "www" + req.path;
+    std::string path = mapToFilePath(req.path);
 
-    int status = std::remove(path.c_str());
+    if (path.empty()) {
+        res.statusCode = 400;
+        res.statusText = "Bad Request";
+        res.body = "Invalid file path";
+        return;
+    }
 
-    if (status == 0) {
+    if (std::filesystem::exists(path)) {
+        std::filesystem::remove(path);
         res.statusCode = 200;
         res.statusText = "OK";
         res.body = "Deleted " + req.path;
@@ -427,11 +546,12 @@ void HttpServer::handleDELETE(Response& res, const Request& req) {
         res.body = "File not found: " + req.path;
     }
 }
+
 // =======================
 // handleClient
 // =======================
 void HttpServer::handleClient(SSL* ssl, int clientSocketFd, const Request& req) {
-    std::cout << "[DEBUG] handleClient START, path=[" << req.path << "]\n";
+    // std::cout << "[DEBUG] handleClient START, path=[" << req.path << "]\n";
 
     Response res;
     res.headers["Content-Type"] = "text/plain";
@@ -496,7 +616,11 @@ void HttpServer::handleClient(SSL* ssl, int clientSocketFd, const Request& req) 
     // 4) ALWAYS send response here (1 lần duy nhất)
     std::string raw = res.build();
     sendAllSSL(ssl, raw.c_str(), raw.size());
-    int sd = SSL_shutdown(ssl);
+
+    SSL_shutdown(ssl);   // gửi close_notify
+    SSL_shutdown(ssl);   // chờ close_notify từ client
+
     SSL_free(ssl);
     close(clientSocketFd);
+
 }

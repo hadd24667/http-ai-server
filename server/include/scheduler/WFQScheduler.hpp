@@ -58,7 +58,7 @@ private:
         double finishTime;
 
         bool operator<(WFQItem const& other) const {
-            return finishTime > other.finishTime; // min-heap
+            return finishTime > other.finishTime; 
         }
     };
 

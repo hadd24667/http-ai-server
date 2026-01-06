@@ -1,0 +1,25 @@
+DEMO GET – đọc file tĩnh (2 cách)
+https://localhost:8080/about.html
+
+DEMO POST
+curl -k -X POST https://localhost:8080/api/file/demo.txt \
+  -H "Content-Type: text/plain" \
+  --data "Hello POST method"
+
+DEMO GET lại file vừa tạo
+curl -k https://localhost:8080/api/file/demo.txt
+
+
+DEMO PUT
+curl -k -X PUT https://localhost:8080/api/file/demo.txt \
+  -H "Content-Type: text/plain" \
+  --data "Updated by PUT method"
+
+Kiểm tra lại
+curl -k https://localhost:8080/api/file/demo.txt
+
+DEMO DELETE
+curl -k -X DELETE https://localhost:8080/api/file/demo.txt
+
+Kiểm tra lại:
+curl -k https://localhost:8080/api/file/demo.txt
